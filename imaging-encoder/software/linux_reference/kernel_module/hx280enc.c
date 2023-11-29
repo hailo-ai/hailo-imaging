@@ -342,7 +342,7 @@ static int hx280enc_release(struct inode *inode, struct file *filp)
 
     refcount_node->refcount--;
     if(refcount_node->refcount == 0) {
-        ResetProcMems(filp);
+        ResetProcMems(cur_pid);
         hash_del(&refcount_node->node);
         kfree(refcount_node);
     }

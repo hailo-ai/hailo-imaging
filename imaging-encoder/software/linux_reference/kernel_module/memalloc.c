@@ -66,15 +66,15 @@ static DEFINE_SPINLOCK(mem_lock);
 typedef struct hlinc {
         u32 bus_address;
         u16 chunks_reserved;
-        const struct file *filp; /* Client that allocated this chunk */
+        int owner_pid; /* Client that allocated this chunk */
 } hlina_chunk;
 
 static hlina_chunk *hlina_chunks = NULL;
 static size_t chunks = 0;
+static size_t remaining_chunks = 0;
 
-static int AllocMemory(unsigned *busaddr, unsigned int size,
-                       const struct file *filp);
-static int FreeMemory(unsigned long busaddr, const struct file *filp);
+static int AllocMemory(unsigned *busaddr, unsigned int size);
+static int FreeMemory(unsigned long busaddr);
 static void ResetMems(void);
 
 long memalloc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
@@ -108,29 +108,25 @@ long memalloc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		__put_user(alloc_base, (unsigned long *) arg);
 		break;
         case MEMALLOC_IOCHARDRESET:
-                //PDEBUG("HARDRESET\n");
                 ResetMems();
                 break;
         case MEMALLOC_IOCXGETBUFFER:
                 ret = copy_from_user(&memparams, (MemallocParams*)arg,
                                      sizeof(MemallocParams));
-                //pr_info("MEMALLOC_IOCXGETBUFFER: size=%d\n", memparams.size );
-                if(ret) break;
+                if(ret) {
+                        printk("MEMALLOC_IOCXGETBUFFER: failed to copy params from user\n");
+                        break;
+                }
 
-                ret = AllocMemory(&memparams.busAddress, memparams.size, filp);
-
-                //pr_info("MEMALLOC_IOCXGETBUFFER: size=%d , busAddress=0x%x, ret=%d\n", memparams.size, memparams.busAddress, ret );
+                ret = AllocMemory(&memparams.busAddress, memparams.size);
                 memparams.translationOffset = addr_transl;
-
                 ret |= copy_to_user((MemallocParams*)arg, &memparams,
                                     sizeof(MemallocParams));
 
                 break;
         case MEMALLOC_IOCSFREEBUFFER:
-                //PDEBUG("FREEBUFFER\n");
-
                 __get_user(busaddr, (unsigned long *) arg);
-                ret = FreeMemory(busaddr, filp);
+                ret = FreeMemory(busaddr);
                 break;
         }
 
@@ -146,10 +142,10 @@ int memalloc_release(struct inode *inode, struct file *filp)
 
         for(i = 0; i < chunks; i++) {
                 spin_lock(&mem_lock);
-                if(hlina_chunks[i].filp == filp) {
+                if(hlina_chunks[i].owner_pid != 0) {
                         printk(KERN_WARNING "memalloc: Found unfreed memory at release time!\n");
 
-                        hlina_chunks[i].filp = NULL;
+                        hlina_chunks[i].owner_pid = 0;
                         hlina_chunks[i].chunks_reserved = 0;
                 }
                 spin_unlock(&mem_lock);
@@ -180,6 +176,7 @@ int memalloc_init(unsigned int  _alloc_base, unsigned int _alloc_size)
         printk("memalloc: Linear memory base = 0x%08x\n", alloc_base);
 
         chunks = (alloc_size * 1024 * 1024) / CHUNK_SIZE;
+        remaining_chunks = chunks;
 
         printk(KERN_INFO "memalloc: Total size %u MB; %lu chunks"
                " of size %lu\n", alloc_size, chunks, CHUNK_SIZE);
@@ -203,8 +200,7 @@ err:
 }
 
 /* Cycle through the buffers we have, give the first free one */
-static int AllocMemory(unsigned *busaddr, unsigned int size,
-                       const struct file *filp)
+static int AllocMemory(unsigned *busaddr, unsigned int size)
 {
 
         int i = 0;
@@ -213,9 +209,14 @@ static int AllocMemory(unsigned *busaddr, unsigned int size,
 
         /* calculate how many chunks we need; round up to chunk boundary */
         unsigned int alloc_chunks = (size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        int cur_pid = current->tgid;
 
         *busaddr = 0;
-        //pr_info("AllocMemory: alloc_chunks=%d, tottal_chunk=%d\n", alloc_chunks, chunks);
+        if (alloc_chunks > remaining_chunks) {
+                printk(KERN_WARNING "%s - Trying to allocate %u chunks when there are only %lu remaining chunks\n",
+                __func__, alloc_chunks, remaining_chunks);
+                return -ENOMEM;
+        }
 
         /* run through the chunk table */
         for(i = 0; i < chunks;) {
@@ -239,7 +240,7 @@ static int AllocMemory(unsigned *busaddr, unsigned int size,
                         /* if enough free memory found */
                         if (!skip_chunks) {
                                 *busaddr = hlina_chunks[i].bus_address;
-                                hlina_chunks[i].filp = filp;
+                                hlina_chunks[i].owner_pid = cur_pid;
                                 hlina_chunks[i].chunks_reserved = alloc_chunks;
                                 break;
                         }
@@ -250,29 +251,33 @@ static int AllocMemory(unsigned *busaddr, unsigned int size,
         }
 
         if(*busaddr == 0) {
-                printk("memalloc: Allocation FAILED: size = %d\n", size);
+                printk(KERN_ERR "memalloc: Allocation FAILED: size = %d\n", size);
                 return -EFAULT;
         } else {
-                //PDEBUG("MEMALLOC OK: size: %d, reserved: %ld\n", size,
-                //       alloc_chunks * CHUNK_SIZE);
+                remaining_chunks -= alloc_chunks;
+                printk(KERN_DEBUG "%s - after allocating %u chunks for proc %d, we have %lu free chunks remaining\n",
+                __func__, alloc_chunks, cur_pid, remaining_chunks);
         }
 
         return 0;
 }
 
 /* Free a buffer based on bus address */
-static int FreeMemory(unsigned long busaddr, const struct file *filp)
+static int FreeMemory(unsigned long busaddr)
 {
         int i = 0;
+        int cur_pid = current->tgid;
 
 
         for(i = 0; i < chunks; i++) {
                 /* user space SW has stored the translated bus address, add addr_transl to
                  * translate back to our address space */
                 if(hlina_chunks[i].bus_address == busaddr + addr_transl) {
-                        if(hlina_chunks[i].filp == filp) {
-                                hlina_chunks[i].filp = NULL;
+                        if(hlina_chunks[i].owner_pid == cur_pid) {
+                                remaining_chunks += hlina_chunks[i].chunks_reserved;
+                                hlina_chunks[i].owner_pid = 0;
                                 hlina_chunks[i].chunks_reserved = 0;
+
                         } else {
                                 printk(KERN_WARNING "memalloc: Owner mismatch while freeing memory!\n");
                         }
@@ -283,16 +288,19 @@ static int FreeMemory(unsigned long busaddr, const struct file *filp)
 }
 
 /* Reset "used" status for all of proc buffers */
-static void ResetProcMems(const struct file *filp)
+static void ResetProcMems(const int cur_pid)
 {
         int i = 0;
 
         for(i = 0; i < chunks; i++) {
-            if(hlina_chunks[i].filp == filp) {
-                hlina_chunks[i].filp = NULL;
+            if(hlina_chunks[i].owner_pid == cur_pid) {
+                remaining_chunks += hlina_chunks[i].chunks_reserved;
+                hlina_chunks[i].owner_pid = 0;
                 hlina_chunks[i].chunks_reserved = 0;
             }
         }
+        printk(KERN_DEBUG "%s - after releasing chunks of proc %d, we have %lu free chunks remaining\n",
+        __func__, cur_pid, remaining_chunks);
 }
 
 /* Reset "used" status */
@@ -303,7 +311,7 @@ static void ResetMems(void)
 
         for(i = 0; i < chunks; i++) {
                 hlina_chunks[i].bus_address = ba;
-                hlina_chunks[i].filp = NULL;
+                hlina_chunks[i].owner_pid = 0;
                 hlina_chunks[i].chunks_reserved = 0;
 
                 ba += CHUNK_SIZE;
