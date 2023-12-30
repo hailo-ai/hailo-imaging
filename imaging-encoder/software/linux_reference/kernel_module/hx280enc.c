@@ -34,6 +34,8 @@
 /* standard error codes */
 #include <linux/errno.h>
 
+#include <linux/dma-direct.h>
+
 #include <linux/moduleparam.h>
 /* request_irq(), free_irq() */
 #include <linux/interrupt.h>
@@ -386,6 +388,7 @@ static long hx280enc_virt_to_phys(unsigned long virt, unsigned long size, phys_a
     unsigned long n_pages;
     long rc = -EINVAL;
     phys_addr_t phys = ~0ul;
+    bool do_cache = true;
 
     vma = find_vma(mm, virt);
     if (!vma) {
@@ -426,6 +429,14 @@ static long hx280enc_virt_to_phys(unsigned long virt, unsigned long size, phys_a
                 __func__);
         return rc;
     }
+
+    if (rc == 0 && vma && !hx280enc_vma_needs_cache_ops(vma))
+        do_cache = false;
+
+    if (do_cache)
+        dma_sync_single_for_device(hx280enc_data.dma_dev, phys_to_dma(hx280enc_data.dma_dev, phys),
+                                   size, DMA_TO_DEVICE);
+
     *paddr = phys;
     return 0;
 }
