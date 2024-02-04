@@ -16,6 +16,8 @@
  * along with this program; if not, write to the Free Software 
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, 
  * USA. 
+ *
+ * Copyright (c) 2015 - 2017 Cadence Design Systems, Inc.
  */
 
 #include <linux/kernel.h>
@@ -111,7 +113,7 @@ MODULE_DESCRIPTION("H2 Encoder driver");
 #define HX280ENC_BKT_NUM            10
 #define HX280ENC_HASH_BITS          32
 
-#define HX280ENC_FRAME_TIME_TENTH_SEC 4
+#define HX280ENC_FRAME_TIME_TENTH_SEC 10
 #define HX280ENC_TMO_SAFTY_FACTOR   3
 
 long irq_timeout_jiffies = (HZ / 100) * (HX280ENC_FRAME_TIME_TENTH_SEC * HX280ENC_TMO_SAFTY_FACTOR);
@@ -163,8 +165,6 @@ static hx280enc_t hx280enc_data;
 static int ReserveIO(void);
 static void ReleaseIO(void);
 static void ResetAsic(hx280enc_t * dev);
-static long hx280enc_gup_virt_to_phys(unsigned long vaddr, unsigned long size,
-    phys_addr_t *paddr);
 static long hx280enc_virt_to_phys(unsigned long virt,unsigned long size, phys_addr_t *paddr);
 static long hx280enc_pfn_virt_to_phys(struct vm_area_struct *vma, unsigned long vaddr,
     unsigned long size, phys_addr_t *paddr);
@@ -353,16 +353,6 @@ static int hx280enc_release(struct inode *inode, struct file *filp)
     return 0;
 }
 
-static void hx280enc_put_pages(phys_addr_t phys, unsigned long n_pages)
-{
-    struct page *page;
-    unsigned long i;
-
-    page = pfn_to_page(__phys_to_pfn(phys));
-    for (i = 0; i < n_pages; ++i)
-        put_page(page + i);
-}
-
 bool hx280enc_cacheable(unsigned long pfn, unsigned long n_pages)
 {
     unsigned long i;
@@ -402,6 +392,8 @@ static long hx280enc_virt_to_phys(unsigned long virt, unsigned long size, phys_a
     * uncached or HW-specific cache operations can handle it.
     */
     if (vma && vma->vm_flags & (VM_IO | VM_PFNMAP)) {
+        pr_debug("%s: Got driver allocated buffer (addr: 0x%lx)\n",
+                __func__, virt);
         rc = hx280enc_pfn_virt_to_phys(vma, virt, size, &phys);
         if (rc == 0 && hx280enc_vma_needs_cache_ops(vma) &&
             !hx280enc_cacheable(PFN_DOWN(phys), n_pages)) {
@@ -410,17 +402,9 @@ static long hx280enc_virt_to_phys(unsigned long virt, unsigned long size, phys_a
             rc = -EINVAL;
         }
     } else {
-        mmap_read_unlock(mm);
-        rc = hx280enc_gup_virt_to_phys(virt, size, &phys);
-        if (rc == 0 &&
-            (!vma || hx280enc_vma_needs_cache_ops(vma)) &&
-            !hx280enc_cacheable(PFN_DOWN(phys), n_pages)) {
-            pr_debug("%s: needs unsupported cache mgmt\n",
-                    __func__);
-            hx280enc_put_pages(phys, n_pages);
-            rc = -EINVAL;
-        }
-        mmap_read_lock(mm);
+        pr_err("%s: User allocated buffer (addr: 0x%lx) not supported\n",
+                __func__, virt);
+        rc = -EINVAL;
     }
 
     /* We couldn't share it. Fail the request. */
@@ -472,57 +456,6 @@ static long hx280enc_pfn_virt_to_phys(struct vm_area_struct *vma, unsigned long 
     }
     pr_debug("%s: success, paddr: %pap\n", __func__, paddr);
     return 0;
-}
-
-
-static long hx280enc_gup_virt_to_phys(unsigned long vaddr, unsigned long size,
-    phys_addr_t *paddr)
-{
-    int ret;
-    int i;
-    int nr_pages;
-    struct page **page;
-
-    if (PFN_UP(vaddr + size) - PFN_DOWN(vaddr) > INT_MAX)
-        return -EINVAL;
-
-    nr_pages = PFN_UP(vaddr + size) - PFN_DOWN(vaddr);
-    page = kmalloc(nr_pages * sizeof(void *), GFP_KERNEL);
-    if (!page)
-        return -ENOMEM;
-
-    ret = get_user_pages_fast(vaddr, nr_pages, 1, page);
-    if (ret < 0)
-        goto out;
-
-    if (ret < nr_pages) {
-        pr_err("%s: asked for %d pages, but got only %d\n",
-             __func__, nr_pages, ret);
-        nr_pages = ret;
-        ret = -EINVAL;
-        goto out_put;
-    }
-
-    for (i = 1; i < nr_pages; ++i) {
-        if (page[i] != page[i - 1] + 1) {
-            pr_err("%s: non-contiguous physical memory\n",
-                 __func__);
-            ret = -EINVAL;
-            goto out_put;
-        }
-    }
-
-    *paddr = __pfn_to_phys(page_to_pfn(page[0])) + (vaddr & ~PAGE_MASK);
-    ret = 0;
-    pr_err("%s: success, paddr: %pap\n", __func__, paddr);
-
-out_put:
-    if (ret < 0)
-        for (i = 0; i < nr_pages; ++i)
-            put_page(page[i]);
-out:
-    kfree(page);
-    return ret;
 }
 
 static int hx280enc_mmap(struct file *filp,
