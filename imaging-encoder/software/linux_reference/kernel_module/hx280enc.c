@@ -37,6 +37,7 @@
 #include <linux/errno.h>
 
 #include <linux/dma-direct.h>
+#include <linux/dma-buf.h>
 
 #include <linux/moduleparam.h>
 /* request_irq(), free_irq() */
@@ -147,6 +148,7 @@ typedef struct
 	dev_t devt;
     struct class *class;
     struct hlist_head proc_refcount[1 << (HX280ENC_BKT_NUM)];
+    struct hlist_head shared_dmabufs[1 << (HX280ENC_BKT_NUM)];
     struct mutex mlock;
 } hx280enc_t;
 
@@ -157,6 +159,14 @@ struct hx280enc_h_node
     struct hlist_node node;
 };
 
+struct hx280enc_dmabuf_node
+{
+    int fd;
+    struct dma_buf *dmabuf;
+    struct dma_buf_attachment *attachment;
+    struct sg_table *sgt;
+    struct hlist_node node;
+};
 
 /* dynamic allocation? */
 static hx280enc_t hx280enc_data;
@@ -168,6 +178,8 @@ static void ResetAsic(hx280enc_t * dev);
 static long hx280enc_virt_to_phys(unsigned long virt,unsigned long size, phys_addr_t *paddr);
 static long hx280enc_pfn_virt_to_phys(struct vm_area_struct *vma, unsigned long vaddr,
     unsigned long size, phys_addr_t *paddr);
+static int hx280enc_share_dmabuf(int fd, unsigned long *o_paddr);
+static int hx280enc_unshare_dmabuf(int fd);
 
 
 #ifdef HX280ENC_DEBUG
@@ -278,6 +290,24 @@ static long hx280enc_ioctl(struct file *filp,
             return rc;
         }
         __put_user(paddr, (unsigned long *)&(addresses->paddr));
+        break;
+    case HX280ENC_IOC_SHARE_DMABUF:
+        dmabuf_mapping_t *dmabuf_mapping = (dmabuf_mapping_t *)arg;
+        unsigned long dmabuf_phys = 0;
+        if (hx280enc_share_dmabuf(dmabuf_mapping->fd, &dmabuf_phys))
+        {
+            pr_err("%s: Could not share dmabuf for fd %d", __func__, dmabuf_mapping->fd);
+            return -EINVAL;
+        }
+        __put_user(dmabuf_phys, (unsigned long *)&(dmabuf_mapping->paddr));
+        break;
+    case HX280ENC_IOC_UNSHARE_DMABUF:
+        int *fd = (int *)arg;
+        if(hx280enc_unshare_dmabuf(*fd))
+        {
+            pr_err("%s: Could not unshare dmabuf for fd %d", __func__, *fd);
+            return -EINVAL;
+        }
         break;
     default:
         return memalloc_ioctl(filp, cmd, arg);
@@ -423,6 +453,114 @@ static long hx280enc_virt_to_phys(unsigned long virt, unsigned long size, phys_a
 
     *paddr = phys;
     return 0;
+}
+
+static int _hx280enc_get_dmabuf_node(int fd, struct hx280enc_dmabuf_node **dmabuf_node) {
+    struct hx280enc_dmabuf_node *curr;
+    hash_for_each_possible(hx280enc_data.shared_dmabufs, curr, node, hash_64(fd, HX280ENC_HASH_BITS)) {
+        if (curr->fd == fd) {
+            *dmabuf_node = curr;
+            return 0;
+        }
+    }
+
+    return -ENAVAIL;
+}
+
+static int hx280enc_share_dmabuf(int fd, unsigned long *o_paddr)
+{
+    struct dma_buf *dmabuf;
+    struct dma_buf_attachment *attachment;
+    struct sg_table *sgt;
+    unsigned long paddr;
+    struct hx280enc_dmabuf_node *dmabuf_node;
+    int ret = 0;
+
+    ret = _hx280enc_get_dmabuf_node(fd, &dmabuf_node);
+    if (!ret) {
+        pr_err("dmabuf for fd %d already shared\n", fd);
+        return -EINVAL;
+    }
+
+    if (fd < 0) {
+        pr_err("Invalid fd (%d)\n", fd);
+        ret = -EINVAL;
+        goto out;
+    }
+    // Get a reference to the dma_buf object
+    dmabuf = dma_buf_get(fd);
+    if (IS_ERR(dmabuf)) {
+        pr_err("Failed to get dmabuf object for fd %d\n", fd);
+        ret = PTR_ERR(dmabuf);
+        goto out;
+    }
+    // Attach the dma_buf to get the scatter-gather table
+    attachment = dma_buf_attach(dmabuf, hx280enc_data.dma_dev);
+    if (IS_ERR(attachment)) {
+        pr_err("Failed to attach dmabuf for fd %d\n", fd);
+        ret = PTR_ERR(attachment);
+        goto put_dmabuf;
+    }
+    // Get the scatter-gather table
+    sgt = dma_buf_map_attachment(attachment, DMA_BIDIRECTIONAL);
+    if (IS_ERR(sgt)) {
+        pr_err("Failed to map dmabuf for fd %d\n", fd);
+        ret = PTR_ERR(sgt);
+        goto detach_dmabuf;
+    }
+    // Check if the buffer is contiguous
+    if (sgt->nents > 1) {
+        pr_err("Buffer is not contiguous for fd %d\n", fd);
+        ret = -EINVAL;
+        goto unmap_sgt;
+    }
+    // Get the physical base address of the buffer
+    paddr = sg_dma_address(sgt->sgl);
+
+    // save the dmabuf in the hash table
+    dmabuf_node = kzalloc(sizeof(struct hx280enc_dmabuf_node), GFP_KERNEL);
+    if (!dmabuf_node) {
+        pr_err("Failed to allocate dmabuf node\n");
+        ret = -ENOMEM;
+        goto unmap_sgt;
+    }
+    dmabuf_node->fd = fd;
+    dmabuf_node->dmabuf = dmabuf;
+    dmabuf_node->attachment = attachment;
+    dmabuf_node->sgt = sgt;
+    hash_add(hx280enc_data.shared_dmabufs, &dmabuf_node->node, hash_64(fd, HX280ENC_HASH_BITS));
+
+    *o_paddr = paddr;
+    return 0;
+unmap_sgt:
+    dma_buf_unmap_attachment(attachment, sgt, DMA_TO_DEVICE);
+detach_dmabuf:
+    dma_buf_detach(dmabuf, attachment);
+put_dmabuf:
+    dma_buf_put(dmabuf);
+out:
+    return ret;
+}
+
+static int hx280enc_unshare_dmabuf(int fd)
+{
+    // get the dmabuf node from the hash table
+    struct hx280enc_dmabuf_node *dmabuf_node;
+    if (!_hx280enc_get_dmabuf_node(fd, &dmabuf_node)) {
+        // unmap the scatter-gather table
+        dma_buf_unmap_attachment(dmabuf_node->attachment, dmabuf_node->sgt, DMA_TO_DEVICE);
+        // detach the dma_buf
+        dma_buf_detach(dmabuf_node->dmabuf, dmabuf_node->attachment);
+        // put the dma_buf
+        dma_buf_put(dmabuf_node->dmabuf);
+        // remove the node from the hash table
+        hash_del(&dmabuf_node->node);
+        kfree(dmabuf_node);
+        return 0;
+    }
+
+    pr_err("Failed to unshare dmabuf for fd: %d\n", fd);
+    return -EINVAL;
 }
 
 static long hx280enc_pfn_virt_to_phys(struct vm_area_struct *vma, unsigned long vaddr,

@@ -49,6 +49,12 @@ typedef struct address_translation
     unsigned long paddr;
     unsigned long size;
 } address_translation_t;
+
+typedef struct dmabuf_mapping
+{
+    int fd;
+    unsigned long paddr;
+} dmabuf_mapping_t;
 /* Use 'k' as magic number */
 #define HX280ENC_IOC_MAGIC  'k'
 /*
@@ -72,6 +78,8 @@ typedef struct address_translation
 #define HX280ENC_IOCHARDRESET      _IO(HX280ENC_IOC_MAGIC, 8)   /* debugging tool */
 
 #define HX280ENC_IOCG_CORE_WAIT     _IOR(HX280ENC_IOC_MAGIC, 9, unsigned int *)
+#define HX280ENC_IOC_SHARE_DMABUF   _IOWR(HX280ENC_IOC_MAGIC, 10, dmabuf_mapping_t *)
+#define HX280ENC_IOC_UNSHARE_DMABUF _IOW(HX280ENC_IOC_MAGIC, 20, int *)
 #define HX280ENC_IOC_MAXNR 30
 
 
