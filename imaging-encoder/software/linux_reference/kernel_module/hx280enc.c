@@ -69,6 +69,7 @@
 #include <linux/interrupt.h>
 #include <linux/cdev.h>
 
+#include <linux/clk.h>
 #include <linux/hash.h>
 #include <linux/hashtable.h>
 
@@ -146,6 +147,8 @@ typedef struct
     struct device*       dma_dev;
     struct cdev cdev;
 	dev_t devt;
+    struct clk *hclk;
+    struct clk *clk;
     struct class *class;
     struct hlist_head proc_refcount[1 << (HX280ENC_BKT_NUM)];
     struct hlist_head shared_dmabufs[1 << (HX280ENC_BKT_NUM)];
@@ -162,6 +165,7 @@ struct hx280enc_h_node
 struct hx280enc_dmabuf_node
 {
     int fd;
+    int tgid;
     struct dma_buf *dmabuf;
     struct dma_buf_attachment *attachment;
     struct sg_table *sgt;
@@ -178,6 +182,7 @@ static void ResetAsic(hx280enc_t * dev);
 static long hx280enc_virt_to_phys(unsigned long virt,unsigned long size, phys_addr_t *paddr);
 static long hx280enc_pfn_virt_to_phys(struct vm_area_struct *vma, unsigned long vaddr,
     unsigned long size, phys_addr_t *paddr);
+static int _hx280enc_release_all_dmabufs(int tgid);
 static int hx280enc_share_dmabuf(int fd, unsigned long *o_paddr);
 static int hx280enc_unshare_dmabuf(int fd);
 
@@ -375,6 +380,7 @@ static int hx280enc_release(struct inode *inode, struct file *filp)
     refcount_node->refcount--;
     if(refcount_node->refcount == 0) {
         ResetProcMems(cur_pid);
+        _hx280enc_release_all_dmabufs(cur_pid);
         hash_del(&refcount_node->node);
         kfree(refcount_node);
     }
@@ -467,6 +473,22 @@ static int _hx280enc_get_dmabuf_node(int fd, struct hx280enc_dmabuf_node **dmabu
     return -ENAVAIL;
 }
 
+static int _hx280enc_release_all_dmabufs(int tgid) {
+    struct hx280enc_dmabuf_node *curr;
+    int fd;
+    int ret;
+    hash_for_each(hx280enc_data.shared_dmabufs, fd, curr, node) {
+        if (curr->tgid == tgid) {
+            ret = hx280enc_unshare_dmabuf(curr->fd);
+            if(ret) {
+                pr_warn("%s - pid: %d failed to unshare dmabuf for fd %d\n", __func__, tgid, curr->fd);
+            }
+        }
+    }
+
+    return 0;
+}
+
 static int hx280enc_share_dmabuf(int fd, unsigned long *o_paddr)
 {
     struct dma_buf *dmabuf;
@@ -528,6 +550,7 @@ static int hx280enc_share_dmabuf(int fd, unsigned long *o_paddr)
     dmabuf_node->dmabuf = dmabuf;
     dmabuf_node->attachment = attachment;
     dmabuf_node->sgt = sgt;
+    dmabuf_node->tgid = current->tgid;
     hash_add(hx280enc_data.shared_dmabufs, &dmabuf_node->node, hash_64(fd, HX280ENC_HASH_BITS));
 
     *o_paddr = paddr;
@@ -629,6 +652,29 @@ static int vc8000e_probe(struct platform_device *pdev)
 		pr_err("%s:pdev id is %d error\n", __func__,pdev->id);
 		return  -EINVAL;
 	}
+
+    hx280enc_data.hclk = devm_clk_get(dev, "hclk");
+    if (IS_ERR(hx280enc_data.hclk)) {
+        return dev_err_probe(dev, PTR_ERR(hx280enc_data.hclk), "unable to get hclk\n");
+    }
+
+    hx280enc_data.clk = devm_clk_get(dev, "clk");
+    if (IS_ERR(hx280enc_data.clk)) {
+        return dev_err_probe(dev, PTR_ERR(hx280enc_data.clk), "unable to get clk\n");
+    }
+
+    ret = clk_prepare_enable(hx280enc_data.hclk);
+    if (ret) {
+        dev_err(dev, "failed to enable hclk (error %d)\n", ret);
+        return ret;
+    }
+
+    ret = clk_prepare_enable(hx280enc_data.clk);
+    if (ret) {
+        dev_err(dev, "failed to enable clk (error %d)\n", ret);
+        clk_disable_unprepare(hx280enc_data.hclk);
+        return ret;
+    }
 
     irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
@@ -785,6 +831,9 @@ static int vc8000e_remove(struct platform_device *pdev)
     }
 
     ReleaseIO();
+
+    clk_disable_unprepare(hx280enc_data.clk);
+    clk_disable_unprepare(hx280enc_data.hclk);
 
     hash_for_each(hx280enc_data.proc_refcount, bkt, tmp, node) {
         pr_info("%s - deleting hash table node\n", __func__);
