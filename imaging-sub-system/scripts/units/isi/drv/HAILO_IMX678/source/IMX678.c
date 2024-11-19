@@ -1,25 +1,28 @@
-/******************************************************************************\
-|* Copyright (c) 2023 Hailo Technologies Ltd. (Hailo) All rights reserved.    *|
-|*                                                                            *|
-|* This proprietary software is the confidential and proprietary information  *|
-|* of Hailo Technologies Ltd. and licensed to Hailo by VeriSilicon Holdings   *|
-|* Co., Ltd. You may not disclose, copy, distribute, any part of this         *|
-|* software without the express written permission of Hailo.                  *|
-|* You may use this software only in accordance with the terms of the license *|
-|* agreement provided with the software ("End User License Agreement").       *|
-|*                                                                            *|
-\******************************************************************************/
-/******************************************************************************\
-|* Copyright (c) 2020 by VeriSilicon Holdings Co., Ltd. ("VeriSilicon")       *|
-|* All Rights Reserved.                                                       *|
-|*                                                                            *|
-|* The material in this file is confidential and contains trade secrets of    *|
-|* of VeriSilicon.  This is proprietary information owned or licensed by      *|
-|* VeriSilicon.  No part of this work may be disclosed, reproduced, copied,   *|
-|* transmitted, or used in any way for any purpose, without the express       *|
-|* written permission of VeriSilicon.                                         *|
-|*                                                                            *|
-\******************************************************************************/
+/****************************************************************************
+ *
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2014-2023 Vivante Corporation
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
+ *
+ ****************************************************************************/
 
 #include <common/return_codes.h>
 #include <ebase/builtins.h>
@@ -66,7 +69,7 @@ CREATE_TRACER(IMX678_REG_DEBUG, "IMX678: ", INFO, 1);
 #define IMX678_HMAX 0xaec
 #define IMX678_VMAX_30FPS 4500
 #define IMX678_VMAX_3DOL_HDR 6750
-#define IMX678_VMAX_2DOL_HDR 6750
+#define IMX678_VMAX_2DOL_HDR 4500
 #define IMX678_VMAX_MAX 135000
 #define IMX678_MIN_SHR 3
 #define IMX678_MAX_GAIN_AEC                                                    \
@@ -86,8 +89,10 @@ CREATE_TRACER(IMX678_REG_DEBUG, "IMX678: ", INFO, 1);
 #define IMX678_SHR2_RHS1_GAP 7
 #define IMX678_SHR2_RHS2_GAP 3
 #define IMX678_PIXEL_CLK_RATE 74.25
-#define DEFAULT_RHS1 0x91
-#define DEFAULT_RHS2 0xaa
+#define DEFAULT_RHS1_3DOL 0x1F3
+#define DEFAULT_RHS2_3DOL 0x230
+#define DEFAULT_RHS1_2DOL 0x5cd
+#define DEFAULT_RHS2_2DOL 0x53
 #define MICRO_2_NANO 1000
 
 FlickerModePeaksPerSec flickerPeaksPerSecMap[] = {
@@ -175,7 +180,7 @@ static struct vvsensor_mode_s pimx678_mode_info[] = {
 		.bayer_pattern = BAYER_RGGB,
         .ae_info = {
 		.one_line_exp_time_ns = 7407,
-		.max_integration_time = DEFAULT_RHS1 - IMX678_3DOL_SHR1_RHS1_GAP,
+		.max_integration_time = DEFAULT_RHS1_3DOL - IMX678_3DOL_SHR1_RHS1_GAP,
 		.min_integration_time = 1,
 		.integration_accuracy = 1,
 		.max_gain = IMX678_MAX_GAIN,
@@ -201,7 +206,7 @@ static struct vvsensor_mode_s pimx678_mode_info[] = {
 		.bayer_pattern = BAYER_RGGB,
         .ae_info = {
 		.one_line_exp_time_ns = 7407,
-		.max_integration_time = DEFAULT_RHS1 - IMX678_3DOL_SHR1_RHS1_GAP,
+		.max_integration_time = DEFAULT_RHS1_3DOL - IMX678_3DOL_SHR1_RHS1_GAP,
 		.min_integration_time = 1,
 		.integration_accuracy = 1,
 		.max_gain = IMX678_MAX_GAIN,
@@ -220,14 +225,14 @@ static struct vvsensor_mode_s pimx678_mode_info[] = {
 			.width         = 3840,
 			.height        = 2160,
 		},
-		.fps       = 20 * ISI_FPS_ACCURACY,
+		.fps       = 30 * ISI_FPS_ACCURACY,
 		.hdr_mode  = SENSOR_MODE_HDR_STITCH,
 		.stitching_mode = SENSOR_STITCHING_L_AND_S,
 		.bit_width = 12,
 		.bayer_pattern = BAYER_RGGB,
         .ae_info = {
 		.one_line_exp_time_ns = 7407,
-		.max_integration_time = DEFAULT_RHS1 - IMX678_2DOL_SHR1_RHS1_GAP,
+		.max_integration_time = DEFAULT_RHS1_2DOL - IMX678_2DOL_SHR1_RHS1_GAP,
 		.min_integration_time = 1,
 		.integration_accuracy = 1,
 		.max_gain = IMX678_MAX_GAIN,
@@ -1450,11 +1455,16 @@ RESULT IMX678_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
                 TRACE(IMX678_ERROR, "%s: Invalid parameter (RHS1 or RHS2 not set)\n", __func__);
                 return (RET_WRONG_CONFIG);
             }
+	
 
             rhs1 = pIMX678Ctx->cur_rhs1;
             rhs2 = pIMX678Ctx->cur_rhs2;
             if (pIMX678Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
-                new_vmax = IMX678_VMAX_2DOL_HDR;
+                if(IMX678_ReadVmax(pIMX678Ctx, &new_vmax) != RET_SUCCESS){
+                    TRACE(IMX678_ERROR, "%s: unable to read vmax\n", __func__);
+                    new_vmax = IMX678_VMAX_2DOL_HDR;
+                }
+
                 exp = new_vmax - exp;
                 exp = exp > rhs1 + IMX678_2DOL_SHR0_RHS1_GAP ? exp : rhs1 + IMX678_2DOL_SHR0_RHS1_GAP;
                 exp = exp < new_vmax - IMX678_2DOL_SHR0_FSC_GAP? exp : new_vmax - IMX678_2DOL_SHR0_FSC_GAP;
@@ -1577,9 +1587,16 @@ RESULT IMX678_IsiSetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 	TRACE(IMX678_DEBUG, "%s - calculated IT in rows = 0x%x\n", __func__, exp);
 
 	if (fabs(NewIntegrationTime - pIMX678Ctx->AecCurIntegrationTimeSEF1) > FLT_EPSILON) {
-		exp = rhs1 - exp;
-		exp = exp > IMX678_3DOL_SHR1_RHS1_GAP ? exp : IMX678_3DOL_SHR1_RHS1_GAP;
-		exp = exp < rhs1 - IMX678_SHR1_RHS1_GAP ? exp : rhs1 - IMX678_SHR1_RHS1_GAP;
+		if (pIMX678Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
+			exp = rhs1 - exp;
+			exp = exp > IMX678_2DOL_SHR1_RHS1_GAP ? exp : IMX678_2DOL_SHR1_RHS1_GAP;
+			exp = exp < rhs1 - IMX678_SHR1_RHS1_GAP ? exp : rhs1 - IMX678_SHR1_RHS1_GAP;
+		} else {
+			exp = rhs1 - exp;
+			exp = exp > IMX678_3DOL_SHR1_RHS1_GAP ? exp : IMX678_3DOL_SHR1_RHS1_GAP;
+			exp = exp < rhs1 - IMX678_SHR1_RHS1_GAP ? exp : rhs1 - IMX678_SHR1_RHS1_GAP;
+		}
+
 		TRACE(IMX678_DEBUG, "%s - writing 0x%x to SHR1\n", __func__, exp);
 
 		result |= IMX678_LockRegHold(handle);
@@ -1806,6 +1823,7 @@ RESULT IMX678_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 	float short_gain = 1;
 	bool calculate_gain = false;
 	uint32_t rhs1;
+	uint32_t vmax = IMX678_VMAX_2DOL_HDR; 
 
     if (pIMX678Ctx == NULL || o_long_it == NULL ||
         o_long_gain == NULL || o_short_gain == NULL ||
@@ -1843,6 +1861,10 @@ RESULT IMX678_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
         }
         calculate_gain = true;
     }
+	
+    if(IMX678_ReadVmax(pIMX678Ctx, &vmax) != RET_SUCCESS){
+	    TRACE(IMX678_ERROR, "%s: unable to read vmax\n", __func__);
+    }
 
     // assume gain is 1 and see if ratio can be achieved with integration time
     long_it 		= NewIntegrationTime * hdr_ratio[0];
@@ -1855,23 +1877,23 @@ RESULT IMX678_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 
     TRACE(IMX678_DEBUG, "%s: requested IT in lines long: %f, short: %f\n", 
     __func__, long_exp_val, short_exp_val);
-    long_exp_val 		= IMX678_VMAX_2DOL_HDR - long_exp_val;
+    long_exp_val 		= vmax - long_exp_val;
     short_exp_val 		= rhs1 - short_exp_val;
 
     TRACE(IMX678_DEBUG, "%s: requested IT in shr long: %f, short: %f\n",
     __func__, long_exp_val, short_exp_val);
     if(long_exp_val < rhs1 + IMX678_2DOL_SHR0_RHS1_GAP) {
         long_exp_val = rhs1 + IMX678_2DOL_SHR0_RHS1_GAP;
-        long_it = (IMX678_VMAX_2DOL_HDR - long_exp_val) * pIMX678Ctx->one_line_exp_time;
+        long_it = (vmax - long_exp_val) * pIMX678Ctx->one_line_exp_time;
         calculate_gain = true;
         TRACE(IMX678_DEBUG, "%s: long_exp_val is too long, set to %u, new long_it = %f\n",
         __func__, rhs1 + IMX678_2DOL_SHR0_RHS1_GAP, long_it);
-    } else if(long_exp_val > IMX678_VMAX_2DOL_HDR - IMX678_2DOL_SHR0_FSC_GAP) {
-        long_exp_val = IMX678_VMAX_2DOL_HDR - IMX678_2DOL_SHR0_FSC_GAP;
-        long_it = (IMX678_VMAX_2DOL_HDR - long_exp_val) * pIMX678Ctx->one_line_exp_time;
+    } else if(long_exp_val > vmax - IMX678_2DOL_SHR0_FSC_GAP) {
+        long_exp_val = vmax - IMX678_2DOL_SHR0_FSC_GAP;
+        long_it = (vmax - long_exp_val) * pIMX678Ctx->one_line_exp_time;
         calculate_gain = true;
         TRACE(IMX678_DEBUG, "%s: long_exp_val is too short, set to %u, new long_it = %f\n",
-        __func__, IMX678_VMAX_2DOL_HDR - IMX678_2DOL_SHR0_FSC_GAP, long_it);
+        __func__, vmax - IMX678_2DOL_SHR0_FSC_GAP, long_it);
     }
     if(short_exp_val < IMX678_2DOL_SHR1_MIN_GAP) {
         short_exp_val = IMX678_2DOL_SHR1_MIN_GAP;
@@ -2077,6 +2099,9 @@ RESULT IMX678_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
         return RET_NULL_POINTER;
     }
     if (pIMX678Ctx->flicker_fps_mode == flickerMode) {
+        return RET_SUCCESS;
+    }
+    if (pIMX678Ctx->enableHdr && (pIMX678Ctx->SensorMode.stitching_mode != SENSOR_STITCHING_L_AND_S)) {
         return RET_SUCCESS;
     }
     if (flickerMode > ISI_AE_ANTIBANDING_MODE_AUTO) {

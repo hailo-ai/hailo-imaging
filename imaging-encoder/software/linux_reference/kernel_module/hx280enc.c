@@ -153,6 +153,7 @@ typedef struct
     struct hlist_head proc_refcount[1 << (HX280ENC_BKT_NUM)];
     struct hlist_head shared_dmabufs[1 << (HX280ENC_BKT_NUM)];
     struct mutex mlock;
+    struct mutex mlock_shared_dmabufs;
 } hx280enc_t;
 
 struct hx280enc_h_node
@@ -308,11 +309,14 @@ static long hx280enc_ioctl(struct file *filp,
         break;
     case HX280ENC_IOC_UNSHARE_DMABUF:
         int *fd = (int *)arg;
+        mutex_lock(&hx280enc_data.mlock_shared_dmabufs);
         if(hx280enc_unshare_dmabuf(*fd))
         {
             pr_err("%s: Could not unshare dmabuf for fd %d", __func__, *fd);
+            mutex_unlock(&hx280enc_data.mlock_shared_dmabufs);
             return -EINVAL;
         }
+        mutex_unlock(&hx280enc_data.mlock_shared_dmabufs);
         break;
     default:
         return memalloc_ioctl(filp, cmd, arg);
@@ -469,7 +473,6 @@ static int _hx280enc_get_dmabuf_node(int fd, struct hx280enc_dmabuf_node **dmabu
             return 0;
         }
     }
-
     return -ENAVAIL;
 }
 
@@ -477,6 +480,7 @@ static int _hx280enc_release_all_dmabufs(int tgid) {
     struct hx280enc_dmabuf_node *curr;
     int fd;
     int ret;
+    mutex_lock(&hx280enc_data.mlock_shared_dmabufs);
     hash_for_each(hx280enc_data.shared_dmabufs, fd, curr, node) {
         if (curr->tgid == tgid) {
             ret = hx280enc_unshare_dmabuf(curr->fd);
@@ -485,7 +489,7 @@ static int _hx280enc_release_all_dmabufs(int tgid) {
             }
         }
     }
-
+    mutex_unlock(&hx280enc_data.mlock_shared_dmabufs);
     return 0;
 }
 
@@ -551,8 +555,9 @@ static int hx280enc_share_dmabuf(int fd, unsigned long *o_paddr)
     dmabuf_node->attachment = attachment;
     dmabuf_node->sgt = sgt;
     dmabuf_node->tgid = current->tgid;
+    mutex_lock(&hx280enc_data.mlock_shared_dmabufs);
     hash_add(hx280enc_data.shared_dmabufs, &dmabuf_node->node, hash_64(fd, HX280ENC_HASH_BITS));
-
+    mutex_unlock(&hx280enc_data.mlock_shared_dmabufs);
     *o_paddr = paddr;
     return 0;
 unmap_sgt:
@@ -581,7 +586,6 @@ static int hx280enc_unshare_dmabuf(int fd)
         kfree(dmabuf_node);
         return 0;
     }
-
     pr_err("Failed to unshare dmabuf for fd: %d\n", fd);
     return -EINVAL;
 }
@@ -728,6 +732,9 @@ static int vc8000e_probe(struct platform_device *pdev)
 
     hash_init(hx280enc_data.proc_refcount);
     mutex_init(&hx280enc_data.mlock);
+
+    hash_init(hx280enc_data.shared_dmabufs);
+    mutex_init(&hx280enc_data.mlock_shared_dmabufs);
 
     hx280enc_data.devt = MKDEV(hx280enc_major, hx280enc_minor + pdev->id);
     cdev_init(&hx280enc_data.cdev, &hx280enc_fops);
