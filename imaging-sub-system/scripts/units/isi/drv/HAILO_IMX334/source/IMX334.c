@@ -277,20 +277,20 @@ static RESULT IMX334_UnlockRegHold(IsiSensorHandle_t handle) {
 }
 
 static RESULT IMX334_IsiGetModeIss(IsiSensorHandle_t handle, IsiMode_t *pMode) {
-    TRACE(IMX334_INFO, "%s (enter)\n", __func__);
+    printf("%s (enter)\n", __func__);
     IMX334_Context_t *pIMX334Ctx = (IMX334_Context_t *)handle;
     if (pIMX334Ctx == NULL) {
         return (RET_WRONG_HANDLE);
     }
     memcpy(pMode, &(pIMX334Ctx->SensorMode), sizeof(pIMX334Ctx->SensorMode));
 
-    TRACE(IMX334_INFO, "%s (exit)\n", __func__);
+    printf("%s (exit)\n", __func__);
     return (RET_SUCCESS);
 }
 
 static RESULT IMX334_IsiSetModeIss(IsiSensorHandle_t handle, IsiMode_t *pMode) {
     int ret = 0;
-    TRACE(IMX334_INFO, "%s (enter)\n", __func__);
+    printf("%s (enter)\n", __func__);
 
     IMX334_Context_t *pIMX334Ctx = (IMX334_Context_t *)handle;
     if (pIMX334Ctx == NULL) {
@@ -352,7 +352,7 @@ static RESULT IMX334_IsiGetCapsIss(IsiSensorHandle_t handle, IsiCaps_t *pCaps) {
 
     RESULT result = RET_SUCCESS;
 
-    TRACE(IMX334_INFO, "%s (enter)\n", __func__);
+    printf("%s (enter)\n", __func__);
 
     if (pIMX334Ctx == NULL) return (RET_WRONG_HANDLE);
 
@@ -385,7 +385,7 @@ static RESULT IMX334_IsiGetCapsIss(IsiSensorHandle_t handle, IsiCaps_t *pCaps) {
     }
     TRACE(IMX334_INFO, "got caps - width %d height %d buswidth %d\n",
           pCaps->Resolution.width, pCaps->Resolution.height, pCaps->BusWidth);
-    TRACE(IMX334_INFO, "%s (exit)\n", __func__);
+    printf("%s (exit)\n", __func__);
     return (result);
 }
 
@@ -423,7 +423,7 @@ static RESULT IMX334_IsiSetupIss(IsiSensorHandle_t handle,
     IMX334_Context_t *pIMX334Ctx = (IMX334_Context_t *)handle;
     RESULT result = RET_SUCCESS;
 
-    TRACE(IMX334_INFO, "%s (enter)\n", __func__);
+    printf("%s (enter)\n", __func__);
 
     if (!pIMX334Ctx) {
         TRACE(IMX334_ERROR,
@@ -551,19 +551,19 @@ static RESULT IMX334_IsiGetRevisionIss(IsiSensorHandle_t handle,
     }
 
     *pValue = sensor_id;
-    TRACE(IMX334_INFO, "%s (exit)\n", __func__);
+    printf("%s (exit)\n", __func__);
     return (result);
 }
 
 static RESULT IMX334_IsiSetStreamingIss(IsiSensorHandle_t handle, bool_t on) {
     RESULT result = RET_SUCCESS;
-    TRACE(IMX334_INFO, "%s (enter)\n", __func__);
+    printf("%s (enter)\n", __func__);
 
     IMX334_Context_t *pIMX334Ctx = (IMX334_Context_t *)handle;
 
     pIMX334Ctx->Streaming = on;
 
-    TRACE(IMX334_INFO, "%s (exit)\n", __func__);
+    printf("%s (exit)\n", __func__);
     return (result);
 }
 
@@ -613,7 +613,7 @@ static inline uint32_t IMX334_getNewVmaxAntiFlicker(IMX334_Context_t *pIMX334Ctx
 static RESULT IMX334_IsiUnlimitFpsIss(IsiSensorHandle_t handle,
                                       float maxIntegrationTime) {
     RESULT result = RET_SUCCESS;
-    TRACE(IMX334_INFO, "%s (enter)\n", __func__);
+    printf("%s (enter)\n", __func__);
 
     IMX334_Context_t *pIMX334Ctx = (IMX334_Context_t *)handle;
     if (!pIMX334Ctx) {
@@ -636,7 +636,7 @@ static RESULT IMX334_IsiLimitFpsIss(IsiSensorHandle_t handle) {
     RESULT result = RET_SUCCESS;
     uint32_t current_vmax = 0;
     uint32_t new_vmax = 0;
-    TRACE(IMX334_INFO, "%s (enter)\n", __func__);
+    printf("%s (enter)\n", __func__);
 
     IMX334_Context_t *pIMX334Ctx = (IMX334_Context_t *)handle;
     if (!pIMX334Ctx) {
@@ -1291,7 +1291,7 @@ RESULT IMX334_IsiFocusGetIss(IsiSensorHandle_t handle, IsiFocusPos_t *pPos) {
 RESULT IMX334_IsiGetSensorIss(IsiSensor_t *pIsiSensor) {
     RESULT result = RET_SUCCESS;
     static const char SensorName[16] = "IMX334";
-    TRACE(IMX334_INFO, "%s (enter)\n", __func__);
+    printf("%s (enter)\n", __func__);
 
     if (pIsiSensor != NULL) {
         pIsiSensor->pszName = SensorName;
@@ -1356,7 +1356,7 @@ RESULT IMX334_IsiGetSensorIss(IsiSensor_t *pIsiSensor) {
         result = RET_NULL_POINTER;
     }
 
-    TRACE(IMX334_INFO, "%s (exit)\n", __func__);
+    printf("%s (exit)\n", __func__);
     return (result);
 }
 

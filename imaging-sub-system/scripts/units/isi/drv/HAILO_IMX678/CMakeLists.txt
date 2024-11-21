@@ -23,6 +23,7 @@ file(GLOB pub_headers include/*.h)
 include_directories(
     include
     include_priv
+    ${LIB_ROOT}
     ${LIB_ROOT}/${CMAKE_BUILD_TYPE}/include
     ${CMAKE_SYSROOT}/usr/include/imaging
     )
@@ -50,19 +51,8 @@ SET_TARGET_PROPERTIES(${module}_shared PROPERTIES SOVERSION       ${${module}_IN
 SET_TARGET_PROPERTIES(${module}_shared PROPERTIES VERSION         ${${module}_INTERFACE_CURRENT}.${${module}_INTERFACE_REVISION}.${${module}_INTERFACE_AGE})
 SET_TARGET_PROPERTIES(${module}_shared PROPERTIES FRAMEWORK       TRUE PUBLIC_HEADER "${pub_headers}")
 
-# add convenience target: put sensor driver into the 'bin' output dir as well
-if ( NOT ANDROID )
-add_custom_target(${module}.drv
-                  ALL
-                  COMMAND ${CMAKE_COMMAND} -E copy ${LIB_ROOT}/${CMAKE_BUILD_TYPE}/lib/lib${module}.so.${${module}_INTERFACE_CURRENT} ${LIB_ROOT}/${CMAKE_BUILD_TYPE}/bin/${module}.drv
-                  DEPENDS ${module}_shared
-                  COMMENT "Copying ${module} driver module"
-                  )
-endif()
-
 add_custom_target(${module}.init
                   ALL
-		  COMMAND ${CMAKE_COMMAND} -E copy ${UNITS_TOP_DIRECTORY}/isi/drv/HAILO_IMX678/source/IMX678_mipi4lane_1080p_3dol_init.txt  ${LIB_ROOT}/${CMAKE_BUILD_TYPE}/bin/HAILO_IMX678_mipi4lane_1080p_3dol_init.txt
 		  DEPENDS ${module}_shared
                   COMMENT "Copying ${module} init files"
                   )

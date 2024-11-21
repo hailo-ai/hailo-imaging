@@ -23,6 +23,7 @@ file(GLOB pub_headers include/*.h)
 include_directories(
     include
     include_priv
+    ${LIB_ROOT}
     ${LIB_ROOT}/${CMAKE_BUILD_TYPE}/include
     ${CMAKE_SYSROOT}/usr/include/imaging
     )
