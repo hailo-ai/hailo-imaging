@@ -94,6 +94,7 @@ CREATE_TRACER(IMX678_REG_DEBUG, "IMX678: ", INFO, 1);
 #define DEFAULT_RHS1_2DOL 0x5cd
 #define DEFAULT_RHS2_2DOL 0x53
 #define MICRO_2_NANO 1000
+#define IMX678_2DOL_NUM_EXP 2
 
 FlickerModePeaksPerSec flickerPeaksPerSecMap[] = {
     { ISI_AE_ANTIBANDING_MODE_OFF, 0 },
@@ -1463,6 +1464,8 @@ RESULT IMX678_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
                 if(IMX678_ReadVmax(pIMX678Ctx, &new_vmax) != RET_SUCCESS){
                     TRACE(IMX678_ERROR, "%s: unable to read vmax\n", __func__);
                     new_vmax = IMX678_VMAX_2DOL_HDR;
+                }else{
+                    new_vmax *= IMX678_2DOL_NUM_EXP;
                 }
 
                 exp = new_vmax - exp;
@@ -1865,6 +1868,8 @@ RESULT IMX678_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
     if(IMX678_ReadVmax(pIMX678Ctx, &vmax) != RET_SUCCESS){
 	    TRACE(IMX678_ERROR, "%s: unable to read vmax\n", __func__);
     }
+
+    vmax *= IMX678_2DOL_NUM_EXP;
 
     // assume gain is 1 and see if ratio can be achieved with integration time
     long_it 		= NewIntegrationTime * hdr_ratio[0];
