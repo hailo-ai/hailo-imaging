@@ -9,9 +9,9 @@ add_definitions("-DHAL_ALTERA")
 endif()
 
 # define interface version
-set (${module}_INTERFACE_CURRENT  1)
-set (${module}_INTERFACE_REVISION 0)
-set (${module}_INTERFACE_AGE      0)
+set (${module}_INTERFACE_CURRENT  2)
+set (${module}_INTERFACE_REVISION 3)
+set (${module}_INTERFACE_AGE      4)
 
 # we want to compile all .c files as default
 file(GLOB libsources source/IMX678.c )
