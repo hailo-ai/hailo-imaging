@@ -72,8 +72,6 @@
 #include <linux/clk.h>
 #include <linux/hash.h>
 #include <linux/hashtable.h>
-#include <linux/delay.h>
-#include <linux/reset.h>
 
 
 //#define HX280ENC_DEBUG
@@ -117,8 +115,10 @@ MODULE_DESCRIPTION("H2 Encoder driver");
 #define HX280ENC_BKT_NUM            10
 #define HX280ENC_HASH_BITS          32
 
-#define HX280ENC_IRQ_TIMEOUT_MSEC (1000)
+#define HX280ENC_FRAME_TIME_TENTH_SEC 10
+#define HX280ENC_TMO_SAFTY_FACTOR   3
 
+long irq_timeout_jiffies = (HZ / 100) * (HX280ENC_FRAME_TIME_TENTH_SEC * HX280ENC_TMO_SAFTY_FACTOR);
 unsigned long base_port = INTEGRATOR_LOGIC_MODULE0_BASE;
 int irq = HW_INTERRUPTS__H265_INT_IRQ;
 
@@ -154,7 +154,6 @@ typedef struct
     struct hlist_head shared_dmabufs[1 << (HX280ENC_BKT_NUM)];
     struct mutex mlock;
     struct mutex mlock_shared_dmabufs;
-    struct reset_control *h265_rst;
 } hx280enc_t;
 
 struct hx280enc_h_node
@@ -181,7 +180,6 @@ static hx280enc_t hx280enc_data;
 static int ReserveIO(void);
 static void ReleaseIO(void);
 static void ResetAsic(hx280enc_t * dev);
-static int ResetAsicHard(hx280enc_t * dev);
 static long hx280enc_virt_to_phys(unsigned long virt,unsigned long size, phys_addr_t *paddr);
 static long hx280enc_pfn_virt_to_phys(struct vm_area_struct *vma, unsigned long vaddr,
     unsigned long size, phys_addr_t *paddr);
@@ -228,8 +226,7 @@ unsigned int WaitEncReady(hx280enc_t *dev)
 {
     
 
-   if(!wait_event_timeout(enc_wait_queue, CheckEncIrq(dev),
-      msecs_to_jiffies(HX280ENC_IRQ_TIMEOUT_MSEC)))
+	if(!wait_event_timeout(enc_wait_queue, CheckEncIrq(dev), irq_timeout_jiffies))
    {
 	   pr_err("%s - wait_event_timeout timed out\n", __func__);
 	   return -ETIMEDOUT;
@@ -320,14 +317,6 @@ static long hx280enc_ioctl(struct file *filp,
             return -EINVAL;
         }
         mutex_unlock(&hx280enc_data.mlock_shared_dmabufs);
-        break;
-    case HX280ENC_IOCHARDRESET:
-        printk(KERN_DEBUG "HX280ENC_IOCHARDRESET - resetting ASIC\n");
-        if(ResetAsicHard(&hx280enc_data))
-        {
-            pr_err("%s: Could not reset ASIC", __func__);
-            return -EINVAL;
-        }
         break;
     default:
         return memalloc_ioctl(filp, cmd, arg);
@@ -660,7 +649,6 @@ static int vc8000e_probe(struct platform_device *pdev)
     struct device *dev = &pdev->dev;
     struct device_node *node;
     struct reserved_mem *rmem = NULL;
-    struct reset_control *h265_reset = NULL;
     int ret;
 
     if (pdev->id >= ENCODER_DEVICE_MAXCNT)
@@ -706,13 +694,6 @@ static int vc8000e_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-    h265_reset = devm_reset_control_get(dev,"h265-rst");
-    if (IS_ERR(h265_reset)) {
-        ret = PTR_ERR(h265_reset);
-        dev_err_probe(dev, ret, "failed to get h265_reset: %d\n", ret);
-        return ret;
-    }
-
     printk(KERN_INFO "hx280enc: module init - base_port=0x%08lx irq=%i\n",
            base_port, irq);
 
@@ -729,7 +710,6 @@ static int vc8000e_probe(struct platform_device *pdev)
     hx280enc_data.async_queue = NULL;
     hx280enc_data.hwregs = NULL;
     hx280enc_data.dma_dev = &pdev->dev;
-    hx280enc_data.h265_rst = h265_reset;
 
     if (devise_register_index == 0)
 	{
@@ -948,35 +928,16 @@ irqreturn_t hx280enc_isr(int irq, void *dev_id)
     unsigned int handled = 0;
     hx280enc_t *dev = (hx280enc_t *) dev_id;
     u32 irq_status;
-    u32 hwId;
-    u32 majorId;
-    u32 minorId;
-    u32 wClr;
-    bool add_reset = false;
 	
     irq_status = readl(dev->hwregs + 0x04);
+    //pr_info("h265 interrupt: irq_status=0x%x",irq_status);
     if(irq_status & 0x01)
     {
-        u32 val;
-
-        // if the irq is buffer full, sw reset needed to clear the irq
-        if(irq_status & 0x20)
-        {
-            val = readl(dev->hwregs + 0x14);
-            writel(val & (~0x01), dev->hwregs + 0x14);
-            add_reset = true;
-        }
-
         /* clear all IRQ bits. (hwId >= 0x80006001) means IRQ is cleared by writting 1 */
-        hwId = readl(dev->hwregs);
-        majorId = (hwId & 0x0000FF00) >> 8;
-        minorId = (hwId & 0x000000FF);
-        wClr = (majorId >= 0x61 || (majorId == 0x60 && minorId >= 1)) ? irq_status: (irq_status & (~0x1FD));
-        if(add_reset)
-        {
-            // after triggering sw reset, clear the sw reset irq bit
-            wClr |= 0x10;
-        }
+        u32 hwId = readl(dev->hwregs);
+        u32 majorId = (hwId & 0x0000FF00) >> 8;
+        u32 minorId = (hwId & 0x000000FF);
+        u32 wClr = (majorId >= 0x61 || (majorId == 0x60 && minorId >= 1)) ? irq_status: (irq_status & (~0x1FD));
         writel(wClr, dev->hwregs + 0x04);
 
         enc_irq = 1;
@@ -1000,42 +961,6 @@ void ResetAsic(hx280enc_t * dev)
     {
         writel(0, dev->hwregs + i);
     }
-}
-
-int ResetAsicHard(hx280enc_t * dev)
-{
-    int ret = 0;
-
-    if (dev == NULL)
-    {
-        pr_err("dev is NULL\n");
-        return -EINVAL;
-    }
-
-    // disable clocks
-    clk_disable_unprepare(dev->clk);
-    clk_disable_unprepare(dev->hclk);
-
-    // reset the asic
-    ret = reset_control_reset(dev->h265_rst);
-    if (ret < 0) {
-        pr_err("Failed resetting Asic, err %d\n", ret);
-    }
-
-    // re-enable clocks
-    ret |= clk_prepare_enable(dev->hclk);
-    if (ret) {
-        pr_err("failed to enable hclk (error %d)\n", ret);
-        return ret;
-    }
-
-    ret |= clk_prepare_enable(dev->clk);
-    if (ret) {
-        pr_err("failed to enable clk (error %d)\n", ret);
-        clk_disable_unprepare(dev->hclk);
-        return ret;
-    }
-    return ret;
 }
 
 #ifdef HX280ENC_DEBUG

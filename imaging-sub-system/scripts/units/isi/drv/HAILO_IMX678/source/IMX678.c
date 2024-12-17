@@ -1185,7 +1185,7 @@ static inline uint32_t _linear2sensorGain(float gain)
     uint32_t db = 0;
     float log_gain = log10(gain);
     log_gain = (log_gain * 10 * 20) / 3;
-    db = (uint32_t)(log_gain);
+    db = roundf(log_gain);
     return db;
 }
 
@@ -1445,7 +1445,7 @@ RESULT IMX678_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
         TRACE(IMX678_ERROR, "%s: sensor not streaming\n", __func__);
         return RET_FAILURE;
     }
-    exp = NewIntegrationTime / pIMX678Ctx->one_line_exp_time;
+    exp = roundf(NewIntegrationTime / pIMX678Ctx->one_line_exp_time);
 
     TRACE(IMX678_DEBUG, "%s: set AEC_PK_EXPO=0x%05x\n", __func__, exp);
 
@@ -1586,8 +1586,7 @@ RESULT IMX678_IsiSetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 	}
 	TRACE(IMX678_DEBUG, "%s: NewIntegrationTime = %f\n", __func__, NewIntegrationTime);
 
-	exp = (NewIntegrationTime / pIMX678Ctx->one_line_exp_time);
-	TRACE(IMX678_DEBUG, "%s - calculated IT in rows = 0x%x\n", __func__, exp);
+	exp = roundf(NewIntegrationTime / pIMX678Ctx->one_line_exp_time);
 
 	if (fabs(NewIntegrationTime - pIMX678Ctx->AecCurIntegrationTimeSEF1) > FLT_EPSILON) {
 		if (pIMX678Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
@@ -1651,7 +1650,7 @@ RESULT IMX678_IsiSetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 	}
 	TRACE(IMX678_DEBUG, "%s: NewIntegrationTime = %f\n", __func__, NewIntegrationTime);
 
-	exp = (NewIntegrationTime / pIMX678Ctx->one_line_exp_time);
+	exp = roundf(NewIntegrationTime / pIMX678Ctx->one_line_exp_time);
 	TRACE(IMX678_DEBUG, "%s - calculated IT in rows = 0x%x\n", __func__, exp);
 
 	if (fabs(NewIntegrationTime - pIMX678Ctx->AecCurIntegrationTimeSEF2) > FLT_EPSILON) {
