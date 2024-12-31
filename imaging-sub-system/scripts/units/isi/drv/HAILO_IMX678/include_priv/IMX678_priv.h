@@ -264,6 +264,8 @@ static RESULT IMX678_IsiSetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 								uint8_t *pNumberOfFramesToSkip,
 								float *hdr_ratio);
 
+static RESULT IMX678_IsiSetHCGIss(IsiSensorHandle_t handle,
+								bool hcg);
 
 #ifdef __cplusplus
 }
