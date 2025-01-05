@@ -86,19 +86,6 @@ static const struct fmt hdr_fmts[] = { { // TODO: make sure all of those are sup
 			      .num_planes = 3,
 		      } };
 
-struct sensor_name {
-	char *name;
-};
-
-struct sensor_name sensors_names[] = {
-	{
-		.name = "imx678",
-	},
-	{
-		.name = "imx334",
-	},
-};
-
 struct hailo15_vsm {
 	int dx;
 	int dy;
@@ -771,12 +758,10 @@ int find_sensor_subdev() {
             if (file != NULL) {
                 char name[64];
                 if (fscanf(file, "%s", name) == 1) {
-					for (int i = 0; i < sizeof(sensors_names) / sizeof(struct sensor_name); ++i) {
-						if (strcmp(name, sensors_names[i].name) == 0) {
-							closedir(dir);
-							return atoi(entry->d_name + strlen("v4l-subdev"));
-                    	}
-					}
+                    if (strncmp(name, "imx", 3) == 0) { // any imx sensor
+                        closedir(dir);
+                        return atoi(entry->d_name + strlen("v4l-subdev"));
+                    }
                 }
                 fclose(file);
             }
@@ -804,7 +789,7 @@ int main(int argc, char *argv[])
 	current_fmt = NULL;
 	int hdr_enabled = -1;
 	int sensor_sd_index = -1;
-	char sd_sensor_dev_path[32];
+	char sd_sensor_dev_path[32] = {0};
 
 	if (argc == 2 &&
 	    (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
