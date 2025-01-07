@@ -1,0 +1,4 @@
+#ifndef V4L_STREAM_EXAMPLE
+#define V4L_STREAM_EXAMPLE
+
+#endif
