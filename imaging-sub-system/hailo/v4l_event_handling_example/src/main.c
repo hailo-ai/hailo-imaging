@@ -47,6 +47,7 @@ enum hailo15_event_stat_id {
     HAILO15_UEVENT_ISP_AFM_STAT,
     HAILO15_UEVENT_SENSOR_DATALOSS_STAT,
     HAILO15_UEVENT_VSM_DONE_STAT,
+    HAILO15_UEVENT_SENSOR_STREAMING_STAT,
     HAILO15_UEVENT_ISP_STAT_MAX
 };
 
@@ -82,7 +83,8 @@ static bool events_to_handle[] = {
     [HAILO15_UEVENT_ISP_AWB_STAT] = false,
     [HAILO15_UEVENT_ISP_AFM_STAT] = true,
     [HAILO15_UEVENT_SENSOR_DATALOSS_STAT] = true,
-    [HAILO15_UEVENT_VSM_DONE_STAT] = true
+    [HAILO15_UEVENT_VSM_DONE_STAT] = true,
+    [HAILO15_UEVENT_SENSOR_STREAMING_STAT] = true
 };
 
 static bool successfully_subscribed[HAILO15_UEVENT_ISP_STAT_MAX] = {false};
@@ -113,6 +115,9 @@ void handle_extra_stats_event(enum hailo15_event_stat_id id, void *data) {
             break;
         case HAILO15_UEVENT_VSM_DONE_STAT:
             printf("VSM done\n");
+            break;
+        case HAILO15_UEVENT_SENSOR_STREAMING_STAT:
+            printf("Stream detected on sensor %d\n", sensor_index);
             break;
         default:
             printf("Error: unexpected event id %d\n", id);
@@ -180,6 +185,7 @@ int handle_statistic_events(int vid_fd) {
 
             case HAILO15_UEVENT_SENSOR_DATALOSS_STAT:
             case HAILO15_UEVENT_VSM_DONE_STAT:
+            case HAILO15_UEVENT_SENSOR_STREAMING_STAT:
                 handle_extra_stats_event(event.id, event.u.data);
                 continue;
 
