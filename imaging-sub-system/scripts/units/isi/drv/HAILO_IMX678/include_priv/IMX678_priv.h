@@ -133,6 +133,7 @@ typedef struct IMX678_Context_s
     float               AecCurIntegrationTimeSEF1;
     float               AecCurGainSEF2;
     float               AecCurIntegrationTimeSEF2;
+	bool				hcg;
 
     bool                GroupHold;
     uint32_t            OldGain;
@@ -264,6 +265,11 @@ static RESULT IMX678_IsiSetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 								uint8_t *pNumberOfFramesToSkip,
 								float *hdr_ratio);
 
+static RESULT IMX678_IsiSetHCGIss(IsiSensorHandle_t handle,
+								bool hcg);
+
+static RESULT IMX678_IsiGetHCGIss(IsiSensorHandle_t handle,
+								bool *phcg);
 
 #ifdef __cplusplus
 }
