@@ -75,6 +75,7 @@
 #include <linux/delay.h>
 #include <linux/reset.h>
 
+#include <linux/pm_runtime.h>
 
 //#define HX280ENC_DEBUG
 
@@ -679,6 +680,10 @@ static int vc8000e_probe(struct platform_device *pdev)
         return dev_err_probe(dev, PTR_ERR(hx280enc_data.clk), "unable to get clk\n");
     }
 
+	pm_runtime_get_sync(dev);
+	pm_runtime_set_active(dev);
+	pm_runtime_enable(dev);
+
     ret = clk_prepare_enable(hx280enc_data.hclk);
     if (ret) {
         dev_err(dev, "failed to enable hclk (error %d)\n", ret);
@@ -861,6 +866,10 @@ static int vc8000e_remove(struct platform_device *pdev)
 
     clk_disable_unprepare(hx280enc_data.clk);
     clk_disable_unprepare(hx280enc_data.hclk);
+
+	pm_runtime_put_sync(&pdev->dev);
+	pm_runtime_set_suspended(&pdev->dev);
+	pm_runtime_disable(&pdev->dev);
 
     hash_for_each(hx280enc_data.proc_refcount, bkt, tmp, node) {
         pr_info("%s - deleting hash table node\n", __func__);
