@@ -108,7 +108,10 @@ typedef struct IMX715_Context_s
     uint32_t            original_vmax;
     uint32_t            cur_rhs1;
     uint32_t            cur_rhs2;
-    int                 unlimit_fps;       
+    
+    int                 unlimit_fps;
+	int 				unlimit_fps_vmax_changed; 
+	IsiSensorAntibandingMode_t flicker_fps_mode;
 
     uint16_t            FrameLengthLines;       /**< frame line length */
     uint16_t            CurFrameLengthLines;
