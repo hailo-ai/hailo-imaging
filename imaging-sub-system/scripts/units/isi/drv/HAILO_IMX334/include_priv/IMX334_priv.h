@@ -180,6 +180,8 @@ static RESULT IMX334_IsiGetGainIss(IsiSensorHandle_t handle,float *pSetGain);
 
 static RESULT IMX334_IsiGetSEF1GainIss(IsiSensorHandle_t handle,float *pSetGain);
 
+static RESULT IMX334_IsiGetTrivialGainIss(IsiSensorHandle_t handle, float *pSetGain);
+
 static RESULT IMX334_IsiGetGainIncrementIss(IsiSensorHandle_t handle,float *pIncr);
 
 static RESULT IMX334_IsiSetGainIss(IsiSensorHandle_t handle,
@@ -195,6 +197,8 @@ static RESULT IMX334_IsiSetSEF1GainIss(IsiSensorHandle_t handle,
 
 static RESULT IMX334_IsiGetIntegrationTimeIss(IsiSensorHandle_t handle,
 								float *pSetIntegrationTime);
+
+static RESULT IMX334_IsiGetTrivialIntegrationTimeIss(IsiSensorHandle_t handle, float *pSetIntegrationTime);
 
 static RESULT IMX334_IsiGetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 								float *pSetIntegrationTime);

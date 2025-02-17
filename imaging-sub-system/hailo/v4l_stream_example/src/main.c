@@ -50,13 +50,18 @@ static const struct fmt sdr_fmts[] = { {
 			      .num_planes = 1,
 		      },
 		      {
-			      .name = "raw",
+			      .name = "raw_rggb12p",
 			      .pix_fmt = V4L2_PIX_FMT_SRGGB12P,
 			      .num_planes = 1,
 		      },
 			  {
-			      .name = "raw12",
+			      .name = "raw_rggb12",
 			      .pix_fmt = V4L2_PIX_FMT_SRGGB12,
+			      .num_planes = 1,
+			  },
+			  {
+			      .name = "raw_gbrg12",
+			      .pix_fmt = V4L2_PIX_FMT_SGBRG12,
 			      .num_planes = 1,
 		      } };
 
@@ -76,14 +81,19 @@ static const struct fmt hdr_fmts[] = { { // TODO: make sure all of those are sup
 			      .num_planes = 1,
 		      },
 		      {
-			      .name = "raw",
+			      .name = "raw_rggb12p",
 			      .pix_fmt = V4L2_PIX_FMT_SRGGB12P,
 			      .num_planes = 3,
 		      },
 			  {
-			      .name = "raw12",
+			      .name = "raw_rggb12",
 			      .pix_fmt = V4L2_PIX_FMT_SRGGB12,
 			      .num_planes = 3,
+			  },
+			  {
+			      .name = "raw_gbrg12",
+			      .pix_fmt = V4L2_PIX_FMT_SGBRG12,
+			      .num_planes = 2,
 		      } };
 
 struct hailo15_vsm {
@@ -143,7 +153,7 @@ struct __args {
 		.name = "format",
 		.type = STR,
 		.data.s = "nv12",
-		.help = "format of output frame. currently supported: nv12, rgb, yuy2",
+		.help = "format of output frame. currently supported: nv12, rgb, yuy2, raw_rggb12p, raw_rggb12, raw_gbrg12",
 	},
 	{
 		.name = "device",
@@ -631,8 +641,8 @@ static int capture_frames_test_loop(int fd, int out_fd)
 	ret = get_arg("format", &arg);
 	if (ret)
 		return ret;
-
-	if (!strcmp(arg.data.s, "raw") || !strcmp(arg.data.s, "raw12")) {
+	
+	if (!strncmp(arg.data.s, "raw", 3)) {
 		is_raw = 1;
 		ret = get_arg("save", &arg);
 		if (ret)
