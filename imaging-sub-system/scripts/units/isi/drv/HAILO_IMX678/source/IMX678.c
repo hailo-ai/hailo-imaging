@@ -91,7 +91,7 @@ CREATE_TRACER(IMX678_REG_DEBUG, "IMX678: ", INFO, 1);
 #define IMX678_PIXEL_CLK_RATE 74.25
 #define DEFAULT_RHS1_3DOL 0x1F3
 #define DEFAULT_RHS2_3DOL 0x230
-#define DEFAULT_RHS1_2DOL 0xa3
+#define DEFAULT_RHS1_2DOL 0x11B
 #define DEFAULT_RHS2_2DOL 0x53
 #define MICRO_2_NANO 1000
 #define IMX678_2DOL_NUM_EXP 2
@@ -374,7 +374,7 @@ static RESULT IMX678_UpdateFps(IMX678_Context_t *pIMX678Ctx, uint32_t vmax) {
     frame_time = (vmax * pIMX678Ctx->one_line_exp_time);
     if (frame_time == 0) return RET_FAILURE;
 
-    pIMX678Ctx->CurrFps = (uint32_t)(ceil(1 / frame_time));
+    pIMX678Ctx->CurrFps = (uint32_t)(ceil(1 / frame_time)) * ISI_FPS_ACCURACY;
     return RET_SUCCESS;
 }
 
@@ -832,7 +832,7 @@ static inline int IMX678_getFlickerPeaksPerSec(IsiSensorAntibandingMode_t mode) 
             return flickerPeaksPerSecMap[i].value;
         }
     }
-    return 0; // Default to 0 if mode not found
+    return 0; // Defaults to 0 if mode not found
 }
 
 static inline uint32_t IMX678_getNewVmaxAntiFlicker(IMX678_Context_t *pIMX678Ctx, uint32_t requestedVmax) {
@@ -1186,6 +1186,23 @@ static inline uint32_t _linear2sensorGain(float gain)
     float log_gain = log10(gain);
     log_gain = (log_gain * 10 * 20) / 3;
     db = roundf(log_gain);
+    return db;
+}
+
+static inline uint32_t _linear2sensorGainCeil(float gain)
+{
+    const float epsilon = 0.1;
+
+    uint32_t db = 0;
+    float log_gain = log10(gain);
+    log_gain = (log_gain * 10 * 20) / 3;
+
+    // We can assume that due to rounding/quantization, given gain is not exactly accurate.
+    // And if it's lower than it's original value, this function might eventually round down the value
+    // This will break the hdr ratios for this extreme case.
+    // To prevent this, we add epsilon to our calculated gain.
+    // This way, we are only allowed to make mistakes that increase gain, and not decrease it.
+    db = ceil(log_gain + epsilon);
     return db;
 }
 
@@ -1805,13 +1822,13 @@ RESULT IMX678_Calculate3DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
         float real_short_gain = _sensorGain2linear(_linear2sensorGain(NewGain));
         long_gain = (short_it * NewGain * hdr_ratio[0]) / long_it;
         if(optimize_long_gain){
-             long_gain = _sensorGain2linear(_linear2sensorGain(long_gain) + 1);
+             long_gain = _sensorGain2linear(_linear2sensorGainCeil(long_gain));
              long_it = (short_it * real_short_gain * hdr_ratio[0]) / long_gain;
         }
         short_gain = NewGain;
         very_short_gain = (short_it * NewGain) / (very_short_it * hdr_ratio[1]);
         if(optimize_short_gain){
-             very_short_gain = _sensorGain2linear(_linear2sensorGain(very_short_gain) + 1);
+             very_short_gain = _sensorGain2linear(_linear2sensorGainCeil(very_short_gain));
              very_short_it = (short_it * real_short_gain) / (very_short_gain * hdr_ratio[1]);
         }
         TRACE(IMX678_DEBUG, "%s: calculated gain: long: %f, short: %f, very_short: %f\n",
@@ -1937,7 +1954,7 @@ RESULT IMX678_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
         float real_short_gain = _sensorGain2linear(_linear2sensorGain(NewGain));
         long_gain = (short_it * real_short_gain * hdr_ratio[0]) / long_it;
         if(optimize_gain){
-             long_gain = _sensorGain2linear(_linear2sensorGain(long_gain) + 1);
+             long_gain = _sensorGain2linear(_linear2sensorGainCeil(long_gain));
              long_it = (short_it * real_short_gain * hdr_ratio[0]) / long_gain;
         }
 
