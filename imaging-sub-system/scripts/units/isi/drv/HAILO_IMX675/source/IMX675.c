@@ -365,7 +365,7 @@ static RESULT IMX675_UpdateFps(IMX675_Context_t *pIMX675Ctx, uint32_t vmax) {
 
     if (frame_time == 0) return RET_FAILURE;
 
-    pIMX675Ctx->CurrFps = (uint32_t)(ceil(1 / frame_time));
+    pIMX675Ctx->CurrFps = (uint32_t)(ceil(1 / frame_time)) * ISI_FPS_ACCURACY;
     return RET_SUCCESS;
 }
 
