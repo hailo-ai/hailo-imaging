@@ -222,7 +222,7 @@ static RESULT IMX334_UpdateFps(IMX334_Context_t *pIMX334Ctx, uint32_t vmax) {
     frame_time = (vmax * pIMX334Ctx->one_line_exp_time);
     if (frame_time == 0) return RET_FAILURE;
 
-    pIMX334Ctx->CurrFps = (uint32_t)(ceil(1 / frame_time));
+    pIMX334Ctx->CurrFps = (uint32_t)(ceil(1 / frame_time)) * ISI_FPS_ACCURACY;
     return RET_SUCCESS;
 }
 
@@ -790,6 +790,11 @@ RESULT IMX334_IsiGetGainIss(IsiSensorHandle_t handle, float *pSetGain) {
     return (result);
 }
 
+RESULT IMX334_IsiGetTrivialGainIss(IsiSensorHandle_t handle, float *pSetGain) {
+    *pSetGain = 1.0f;
+    return RET_SUCCESS;
+}
+
 RESULT IMX334_IsiGetSEF1GainIss(IsiSensorHandle_t handle, float *pSetGain) {
     IMX334_Context_t *pIMX334Ctx = (IMX334_Context_t *)handle;
     RESULT result = RET_SUCCESS;
@@ -904,6 +909,11 @@ RESULT IMX334_IsiSetSEF1GainIss(IsiSensorHandle_t handle,
     RESULT result = RET_SUCCESS;
 
     return (result);
+}
+
+RESULT IMX334_IsiGetTrivialIntegrationTimeIss(IsiSensorHandle_t handle, float *pSetIntegrationTime) {
+    *pSetIntegrationTime = 0.0f;
+    return RET_SUCCESS;
 }
 
 RESULT IMX334_IsiGetIntegrationTimeIss(IsiSensorHandle_t handle,
@@ -1322,9 +1332,11 @@ RESULT IMX334_IsiGetSensorIss(IsiSensor_t *pIsiSensor) {
         pIsiSensor->pIsiSetIrisLimitsIss = IMX334_IsiSetIrisLimitsIss;
         pIsiSensor->pIsiGetVSGainIss = IMX334_IsiGetSEF1GainIss;
         pIsiSensor->pIsiGetGainIss = IMX334_IsiGetGainIss;
+        pIsiSensor->pIsiGetLongGainIss = IMX334_IsiGetTrivialGainIss; /* Trivial implementation */
         pIsiSensor->pIsiGetGainIncrementIss = IMX334_IsiGetGainIncrementIss;
         pIsiSensor->pIsiGetIrisIncrementIss = IMX334_IsiGetIrisIncrementIss;
         pIsiSensor->pIsiSetGainIss = IMX334_IsiSetGainIss;
+        pIsiSensor->pIsiGetLongIntegrationTimeIss = IMX334_IsiGetTrivialIntegrationTimeIss; /* Trivial implementation */
         pIsiSensor->pIsiGetIntegrationTimeIss = IMX334_IsiGetIntegrationTimeIss;
         pIsiSensor->pIsiGetVSIntegrationTimeIss =
             IMX334_IsiGetSEF1IntegrationTimeIss;
