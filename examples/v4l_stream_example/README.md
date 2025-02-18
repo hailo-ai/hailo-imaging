@@ -22,7 +22,7 @@ like capturing frames and extracting VSM data.
 
 - **width** (*int*): Width of the output frame. Default: 3840.
 - **height** (*int*): Height of the output frame. Default: 2160.
-- **format** (*str*): Format of the output frame. Currently supported formats: nv12, rgb, yuy2. Default: nv12.
+- **format** (*str*): Format of the output frame. Currently supported formats: nv12, rgb, yuy2, raw_rggb12p, raw_rggb12, raw_gbrg12. Default: nv12.
 - **device** (*str*): Path of the video device to test. Default: /dev/video0.
 - **out-path** (*str*): File path for the captured frames. Default: capture.out.
 - **vsm-out-path** (*str*): File path for VSM (Visual Slam Module) data output. Ignored unless the test type is vsm-test. Default: vsm.out.
@@ -71,7 +71,7 @@ hailo_ctrl -d $(find_subdevice_path.sh imx) -c exposure=150000
 ```
 Then, run the raw capture tool with the following command:
 ```sh
-v4l_stream_example --device=/dev/video2 --type=capture --format=raw --num-frames=400
+v4l_stream_example --device=/dev/video2 --type=capture --format=raw_rggb12p --num-frames=400
 ```
-This command captures 400 raw frames from the raw image video device `/dev/video2`.
+This command captures 400 raw frames of format rggb12p from the raw image video device `/dev/video2`.
 The outputs will be stored as separate files (name format is hardcoded, starting with `out_0.raw`).

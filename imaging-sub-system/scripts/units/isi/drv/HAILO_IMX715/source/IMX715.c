@@ -61,7 +61,8 @@ CREATE_TRACER(IMX715_REG_DEBUG, "IMX715: ", INFO, 1);
 #define IMX715_PLL_PCLK 74250000
 #define IMX715_HMAX 0xaec
 #define IMX715_VMAX_30FPS 4500
-#define IMX715_VMAX_HDR 6750
+#define IMX715_VMAX_3DOL_HDR 6750
+#define IMX715_VMAX_2DOL_HDR 4500
 #define IMX715_VMAX_MAX ((1 << 20) - 2)
 #define IMX715_MIN_SHR 3
 #define IMX715_MAX_GAIN_AEC                                                    \
@@ -69,23 +70,40 @@ CREATE_TRACER(IMX715_REG_DEBUG, "IMX715: ", INFO, 1);
                = 62.0, driver limit = 32.0 ) */
 #define IMX715_VS_MAX_INTEGRATION_TIME (0.0018)
 #define IMX715_TRANSFER_BUFFER_LENGTH 3
-#define IMX715_MAX_GAIN 3981
 #define IMX715_TRANSFER_BUFFER_LENGTH 3
+#define IMX715_MAX_GAIN 3981
 #define IMX715_SHR0_RHS2_GAP 7
+#define IMX715_2DOL_SHR0_RHS1_GAP 9
 #define IMX715_SHR0_FSC_GAP 3
-#define IMX715_SHR1_MIN_GAP 7
+#define IMX715_2DOL_SHR0_FSC_GAP 8
+#define IMX715_3DOL_SHR1_RHS1_GAP 7
+#define IMX715_2DOL_SHR1_MIN_GAP 9
 #define IMX715_SHR1_RHS1_GAP 3
+#define IMX715_2DOL_SHR1_RHS1_GAP 8
 #define IMX715_SHR2_RHS1_GAP 7
 #define IMX715_SHR2_RHS2_GAP 3
+#define IMX715_PIXEL_CLK_RATE 74.25
+#define DEFAULT_RHS1_3DOL 0x1F3
+#define DEFAULT_RHS2_3DOL 0x230
+#define DEFAULT_RHS1_2DOL 0x11d
+#define DEFAULT_RHS2_2DOL 0x53
 #define IMX715_PIXEL_CLK_RATE 74.25
 #define DEFAULT_RHS1 0x91
 #define DEFAULT_RHS2 0xaa
 #define MICRO_2_NANO 1000
+#define IMX715_2DOL_NUM_EXP 2
 
 #define SPI_IOC_MAGIC   'k'
 #define HAILO15_IOC_GET_IRIS    _IOR(SPI_IOC_MAGIC, 1, int)
 #define HAILO15_IOC_SET_IRIS    _IOW(SPI_IOC_MAGIC, 2, int)
 
+
+FlickerModePeaksPerSec flickerPeaksPerSecMap[] = {
+    { ISI_AE_ANTIBANDING_MODE_OFF, 0 },
+    { ISI_AE_ANTIBANDING_MODE_50HZ, 100 },
+    { ISI_AE_ANTIBANDING_MODE_60HZ, 120 },
+    { ISI_AE_ANTIBANDING_MODE_AUTO, 100 }
+};
 
 /*****************************************************************************
  *Forward Declarations
@@ -113,7 +131,7 @@ static struct vvsensor_mode_s pimx715_mode_info[] = {
 	.bit_width = 12,
 	.bayer_pattern = BAYER_GBRG,
 	.ae_info = {
-		.one_line_exp_time_ns = 7410,
+		.one_line_exp_time_ns = 7407,
 		.max_integration_time = IMX715_VMAX_30FPS - IMX715_MIN_SHR,
 		.min_integration_time = 1,
 		.integration_accuracy = 1,
@@ -136,9 +154,9 @@ static struct vvsensor_mode_s pimx715_mode_info[] = {
 	.fps       = 30 * ISI_FPS_ACCURACY,
 	.hdr_mode  = SENSOR_MODE_LINEAR,
 	.bit_width = 12,
-	.bayer_pattern = BAYER_RGGB,
+	.bayer_pattern = BAYER_GBRG,
 	.ae_info = {
-		.one_line_exp_time_ns = 7410,
+		.one_line_exp_time_ns = 7407,
 		.max_integration_time = IMX715_VMAX_30FPS - IMX715_MIN_SHR,
 		.min_integration_time = 1,
 		.integration_accuracy = 1,
@@ -164,8 +182,8 @@ static struct vvsensor_mode_s pimx715_mode_info[] = {
 		.bit_width = 12,
 		.bayer_pattern = BAYER_GBRG,
         .ae_info = {
-		.one_line_exp_time_ns = 7410,
-		.max_integration_time = DEFAULT_RHS1 - IMX715_SHR1_MIN_GAP,
+		.one_line_exp_time_ns = 7407,
+		.max_integration_time = DEFAULT_RHS1_3DOL - IMX715_3DOL_SHR1_RHS1_GAP,
 		.min_integration_time = 1,
 		.integration_accuracy = 1,
 		.max_gain = IMX715_MAX_GAIN,
@@ -190,8 +208,8 @@ static struct vvsensor_mode_s pimx715_mode_info[] = {
 		.bit_width = 12,
 		.bayer_pattern = BAYER_GBRG,
         .ae_info = {
-		.one_line_exp_time_ns = 7410,
-		.max_integration_time = DEFAULT_RHS1 - IMX715_SHR1_MIN_GAP,
+		.one_line_exp_time_ns = 7407,
+		.max_integration_time = DEFAULT_RHS1 - IMX715_3DOL_SHR1_RHS1_GAP,
 		.min_integration_time = 1,
 		.integration_accuracy = 1,
 		.max_gain = IMX715_MAX_GAIN,
@@ -199,8 +217,33 @@ static struct vvsensor_mode_s pimx715_mode_info[] = {
 		.gain_accuracy = 1,
 		.cur_fps = 20
 	}
+    },
+    {
+        .index     = 4,
+        .size      ={
+			.bounds_width  = 3840,
+			.bounds_height = 2160,
+			.top           = 0,
+			.left          = 0,
+			.width         = 3840,
+			.height        = 2160,
+		},
+		.fps       = 30 * ISI_FPS_ACCURACY,
+		.hdr_mode  = SENSOR_MODE_HDR_STITCH,
+		.stitching_mode = SENSOR_STITCHING_L_AND_S,
+		.bit_width = 12,
+		.bayer_pattern = BAYER_GBRG,
+        .ae_info = {
+		.one_line_exp_time_ns = 7407,
+		.max_integration_time = DEFAULT_RHS1_2DOL - IMX715_2DOL_SHR1_RHS1_GAP,
+		.min_integration_time = 1,
+		.integration_accuracy = 1,
+		.max_gain = IMX715_MAX_GAIN,
+		.min_gain = 1,
+		.gain_accuracy = 1,
+		.cur_fps = 30
+	}
     }
-
 };
 
 static RESULT IMX715_IsiSetPowerIss(IsiSensorHandle_t handle, bool_t on)
@@ -330,7 +373,7 @@ static RESULT IMX715_UpdateFps(IMX715_Context_t *pIMX715Ctx, uint32_t vmax) {
     frame_time = (vmax * pIMX715Ctx->one_line_exp_time);
     if (frame_time == 0) return RET_FAILURE;
 
-    pIMX715Ctx->CurrFps = (uint32_t)(ceil(1 / frame_time));
+    pIMX715Ctx->CurrFps = (uint32_t)(ceil(1 / frame_time)) * ISI_FPS_ACCURACY;
     return RET_SUCCESS;
 }
 
@@ -669,6 +712,10 @@ static RESULT IMX715_IsiSetupIss(IsiSensorHandle_t handle,
 
     pIMX715Ctx->MaxFps = pIMX715Ctx->SensorMode.fps;
     pIMX715Ctx->CurrFps = pIMX715Ctx->MaxFps;
+
+    pIMX715Ctx->unlimit_fps_vmax_changed = 0;
+    pIMX715Ctx->flicker_fps_mode = ISI_AE_ANTIBANDING_MODE_OFF;
+
     TRACE(IMX715_INFO, "%s - got caps - width %d height %d buswidth %d\n",
           __func__, pIMX715Ctx->SensorMode.size.width,
           pIMX715Ctx->SensorMode.size.height, pIMX715Ctx->SensorMode.bit_width);
@@ -778,6 +825,54 @@ static RESULT IMX715_IsiGetGainLimitsIss(IsiSensorHandle_t handle,
     return (result);
 }
 
+
+static inline int IMX715_getFlickerPeaksPerSec(IsiSensorAntibandingMode_t mode) {
+    int num_modes = sizeof(flickerPeaksPerSecMap) / sizeof(FlickerModePeaksPerSec);
+    for (int i = 0; i < num_modes; i++) {
+        if (flickerPeaksPerSecMap[i].mode == mode) {
+            return flickerPeaksPerSecMap[i].value;
+        }
+    }
+    return 0; // Defaults to 0 if mode not found
+}
+
+static inline uint32_t IMX715_getNewVmaxAntiFlicker(IMX715_Context_t *pIMX715Ctx, uint32_t requestedVmax) {
+    uint32_t closestVmax = requestedVmax;
+    int peaks = 0;
+    int difference = INT_MAX;
+    int minDifference = INT_MAX;
+    if (!pIMX715Ctx) {
+        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        return (-1);
+    }
+    peaks = IMX715_getFlickerPeaksPerSec(pIMX715Ctx->flicker_fps_mode);
+    if (peaks == 0) {
+        // No anti-flicker mode, return requested or original Vmax
+        if (pIMX715Ctx->unlimit_fps && pIMX715Ctx->unlimit_fps_vmax_changed)
+            return requestedVmax;
+        else
+            return pIMX715Ctx->original_vmax;
+    }
+
+    for (int i = 1; i < peaks; ++i) {
+        uint32_t candidateVmax = i / (peaks * pIMX715Ctx->one_line_exp_time);
+        if (candidateVmax < pIMX715Ctx->SensorMode.size.height || candidateVmax < pIMX715Ctx->original_vmax)
+            continue;
+
+        difference = abs((int)requestedVmax - (int)candidateVmax);
+        if (difference < minDifference) {
+            minDifference = difference;
+            closestVmax = candidateVmax;
+        }
+
+        // Since i / peaks is monotonically increasing, we can break early if the difference starts to increase
+        if (candidateVmax > requestedVmax && difference > minDifference) {
+            break;
+        }
+    }
+    return closestVmax;
+}
+
 static RESULT IMX715_IsiUnlimitFpsIss(IsiSensorHandle_t handle,
                                       float maxIntegrationTime) {
     RESULT result = RET_SUCCESS;
@@ -808,6 +903,7 @@ static RESULT IMX715_IsiUnlimitFpsIss(IsiSensorHandle_t handle,
 static RESULT IMX715_IsiLimitFpsIss(IsiSensorHandle_t handle) {
     RESULT result = RET_SUCCESS;
     uint32_t current_vmax = 0;
+    uint32_t new_vmax = 0;
     
     TRACE(IMX715_INFO, "%s (enter)\n", __func__);
 
@@ -825,15 +921,31 @@ static RESULT IMX715_IsiLimitFpsIss(IsiSensorHandle_t handle) {
     IMX715_ReadVmax(handle, &current_vmax);
 
     pIMX715Ctx->unlimit_fps = 0;
+    pIMX715Ctx->unlimit_fps_vmax_changed = 0;
     if (pIMX715Ctx->original_vmax == 0) {
         pIMX715Ctx->original_vmax = current_vmax;
     }
-    if (current_vmax != pIMX715Ctx->original_vmax) {
-        IMX715_WriteVmax(handle, pIMX715Ctx->original_vmax);
+
+    new_vmax = pIMX715Ctx->original_vmax;
+    if (pIMX715Ctx->flicker_fps_mode != ISI_AE_ANTIBANDING_MODE_OFF) {
+        new_vmax = IMX715_getNewVmaxAntiFlicker(pIMX715Ctx, pIMX715Ctx->original_vmax);
+        TRACE(IMX715_DEBUG, "%s -Anti Flicker Fps mode %d, set new vmax %u\n", __func__, pIMX715Ctx->flicker_fps_mode, new_vmax);
+    }
+
+    if (current_vmax != new_vmax) {
+        result |= IMX715_LockRegHold(handle);
+        result |= IMX715_WriteVmax(handle, new_vmax);
+        result |= IMX715_UnlockRegHold(handle);
+
+
+        int shr = MAX((int)current_vmax - (int)(pIMX715Ctx->AecCurIntegrationTimeLEF / pIMX715Ctx->one_line_exp_time), IMX715_MIN_SHR);
+        float configuredIntegrationTime = (new_vmax - shr) * pIMX715Ctx->one_line_exp_time;
+        pIMX715Ctx->OldIntegrationTime = configuredIntegrationTime;
+        pIMX715Ctx->AecCurIntegrationTimeLEF = configuredIntegrationTime;
     }
 
     pIMX715Ctx->MaxIntegrationLine =
-        MAX(pIMX715Ctx->original_vmax - IMX715_MIN_SHR, 1);
+        MAX(new_vmax - IMX715_MIN_SHR, 1);
     TRACE(IMX715_INFO, "%s: set MaxIntegrationLine to %u\n", __func__,
           pIMX715Ctx->MaxIntegrationLine);
     pIMX715Ctx->AecMaxIntegrationTime =
@@ -1078,6 +1190,24 @@ static inline uint32_t _linear2sensorGain(float gain)
     float log_gain = log10(gain);
     log_gain = (log_gain * 10 * 20) / 3;
     db = (uint32_t)(log_gain);
+    return db;
+}
+
+
+static inline uint32_t _linear2sensorGainCeil(float gain)
+{
+    const float epsilon = 0.1;
+
+    uint32_t db = 0;
+    float log_gain = log10(gain);
+    log_gain = (log_gain * 10 * 20) / 3;
+
+    // We can assume that due to rounding/quantization, given gain is not exactly accurate.
+    // And if it's lower than it's original value, this function might eventually round down the value
+    // This will break the hdr ratios in this extreme case.
+    // To prevent this, we add epsilon to our calculated gain.
+    // This way, we are only allowed to make mistakes that increase gain, and not decrease it.
+    db = ceil(log_gain + epsilon);
     return db;
 }
 
@@ -1350,7 +1480,7 @@ RESULT IMX715_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
             }
 
             rhs2 = pIMX715Ctx->cur_rhs2;
-            new_vmax = IMX715_VMAX_HDR;
+            new_vmax = IMX715_VMAX_3DOL_HDR;
             exp = new_vmax - exp;
             exp = exp > rhs2 + IMX715_SHR0_RHS2_GAP ? exp : rhs2 + IMX715_SHR0_RHS2_GAP;
             exp = exp < new_vmax - IMX715_SHR0_FSC_GAP? exp : new_vmax - IMX715_SHR0_FSC_GAP;
@@ -1380,18 +1510,26 @@ RESULT IMX715_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
             }
 
             shr = current_vmax - exp;
+            if (shr < IMX715_MIN_SHR || current_vmax > pIMX715Ctx->original_vmax) {
+                if (shr < IMX715_MIN_SHR) {
+                    // user asked for too big integration-line: more than (current_vmax - minimal_shutter)
+                    // increase vmax and set new shutter to minimal value
+                    new_vmax = MIN(exp + IMX715_MIN_SHR, pIMX715Ctx->MaxIntegrationLine + IMX715_MIN_SHR);
+                } else {
+                    // make sure that when we unlimit fps, stay below original fps.
+                    // also, make sure we are not using high vmax + high shr more than needed (will slow fps for no reason)
+                    new_vmax = MAX(current_vmax - shr + IMX715_MIN_SHR, pIMX715Ctx->original_vmax);
+                }
+                pIMX715Ctx->unlimit_fps_vmax_changed = new_vmax > pIMX715Ctx->original_vmax && pIMX715Ctx->unlimit_fps;
 
-            if (shr < IMX715_MIN_SHR) {
-                new_vmax = MIN(exp + IMX715_MIN_SHR,
-                            pIMX715Ctx->MaxIntegrationLine + IMX715_MIN_SHR);
-                shr = IMX715_MIN_SHR;
+                if (pIMX715Ctx->flicker_fps_mode != ISI_AE_ANTIBANDING_MODE_OFF) {
+                    new_vmax = IMX715_getNewVmaxAntiFlicker(pIMX715Ctx, new_vmax);
+                    TRACE(IMX715_DEBUG, "%s -Anti Flicker Fps mode %d, set new vmax %u\n", __func__, pIMX715Ctx->flicker_fps_mode, new_vmax);
+                }
+
+                shr = MAX(IMX715_MIN_SHR, (int)new_vmax - (int)exp);
                 vmax_updated = 1;
-            } else if (shr > IMX715_MIN_SHR &&
-                    current_vmax > pIMX715Ctx->original_vmax) {
-                new_vmax = MAX(current_vmax - shr + IMX715_MIN_SHR,
-                            pIMX715Ctx->original_vmax);
-                shr = new_vmax - exp;
-                vmax_updated = 1;
+
             } else {
                 new_vmax = current_vmax;
             }
@@ -1457,7 +1595,7 @@ RESULT IMX715_IsiSetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 
 	if (fabs(NewIntegrationTime - pIMX715Ctx->AecCurIntegrationTimeSEF1) > FLT_EPSILON) {
 		exp = rhs1 - exp;
-		exp = exp > IMX715_SHR1_MIN_GAP ? exp : IMX715_SHR1_MIN_GAP;
+		exp = exp > IMX715_2DOL_SHR1_RHS1_GAP ? exp : IMX715_2DOL_SHR1_MIN_GAP;
 		exp = exp < rhs1 - IMX715_SHR1_RHS1_GAP ? exp : rhs1 - IMX715_SHR1_RHS1_GAP;
 		TRACE(IMX715_DEBUG, "%s - writing 0x%x to SHR1\n", __func__, exp);
 
@@ -1535,7 +1673,7 @@ RESULT IMX715_IsiSetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 	return (result);
 }
 
-RESULT IMX715_CalculateHDRExposures(IsiSensorHandle_t handle, float NewIntegrationTime, float NewGain,
+RESULT IMX715_Calculate3DOLExposures(IsiSensorHandle_t handle, float NewIntegrationTime, float NewGain,
                                     float *o_long_it, float *o_short_it, float *o_very_short_it,
                                     float *o_long_gain, float *o_short_gain, float *o_very_short_gain,
                                     float *hdr_ratio) {
@@ -1605,7 +1743,7 @@ RESULT IMX715_CalculateHDRExposures(IsiSensorHandle_t handle, float NewIntegrati
 
     TRACE(IMX715_DEBUG, "%s: requested IT in lines long: %f, short: %f, very_short: %f\n", 
     __func__, long_exp_val, short_exp_val, very_short_exp_val);
-    long_exp_val 		= IMX715_VMAX_HDR - long_exp_val;
+    long_exp_val 		= IMX715_VMAX_3DOL_HDR - long_exp_val;
     short_exp_val 		= rhs1 - short_exp_val;
     very_short_exp_val 	= rhs2 - very_short_exp_val;
 
@@ -1613,23 +1751,23 @@ RESULT IMX715_CalculateHDRExposures(IsiSensorHandle_t handle, float NewIntegrati
     __func__, long_exp_val, short_exp_val, very_short_exp_val);
     if(long_exp_val < rhs2 + IMX715_SHR0_RHS2_GAP) {
         long_exp_val = rhs2 + IMX715_SHR0_RHS2_GAP;
-        long_it = (IMX715_VMAX_HDR - long_exp_val) * pIMX715Ctx->one_line_exp_time;
+        long_it = (IMX715_VMAX_3DOL_HDR - long_exp_val) * pIMX715Ctx->one_line_exp_time;
         calculate_gain = true;
         TRACE(IMX715_DEBUG, "%s: long_exp_val is too long, set to %u, new long_it = %f\n",
         __func__, rhs2 + IMX715_SHR0_RHS2_GAP, long_it);
-    } else if(long_exp_val > IMX715_VMAX_HDR - IMX715_SHR0_FSC_GAP) {
-        long_exp_val = IMX715_VMAX_HDR - IMX715_SHR0_FSC_GAP;
-        long_it = (IMX715_VMAX_HDR - long_exp_val) * pIMX715Ctx->one_line_exp_time;
+    } else if(long_exp_val > IMX715_VMAX_3DOL_HDR - IMX715_SHR0_FSC_GAP) {
+        long_exp_val = IMX715_VMAX_3DOL_HDR - IMX715_SHR0_FSC_GAP;
+        long_it = (IMX715_VMAX_3DOL_HDR - long_exp_val) * pIMX715Ctx->one_line_exp_time;
         calculate_gain = true;
         TRACE(IMX715_DEBUG, "%s: long_exp_val is too short, set to %u, new long_it = %f\n",
-        __func__, IMX715_VMAX_HDR - IMX715_SHR0_FSC_GAP, long_it);
+        __func__, IMX715_VMAX_3DOL_HDR - IMX715_SHR0_FSC_GAP, long_it);
     }
-    if(short_exp_val < IMX715_SHR1_MIN_GAP) {
-        short_exp_val = IMX715_SHR1_MIN_GAP;
+    if(short_exp_val < IMX715_3DOL_SHR1_RHS1_GAP) {
+        short_exp_val = IMX715_3DOL_SHR1_RHS1_GAP;
         short_it = (rhs1 - short_exp_val) * pIMX715Ctx->one_line_exp_time;
         calculate_gain = true;
         TRACE(IMX715_DEBUG, "%s: short_exp_val is too long, set to %u, new short_it = %f\n",
-        __func__, IMX715_SHR1_MIN_GAP, short_it);
+        __func__, IMX715_3DOL_SHR1_RHS1_GAP, short_it);
     } else if(short_exp_val > rhs1 - IMX715_SHR1_RHS1_GAP) {
         short_exp_val = rhs1 - IMX715_SHR1_RHS1_GAP;
         short_it = (rhs1 - short_exp_val) * pIMX715Ctx->one_line_exp_time;
@@ -1670,6 +1808,132 @@ RESULT IMX715_CalculateHDRExposures(IsiSensorHandle_t handle, float NewIntegrati
     return RET_SUCCESS;
 }
 
+RESULT IMX715_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrationTime, float NewGain,
+                                    float *o_long_it, float *o_short_it,
+                                    float *o_long_gain, float *o_short_gain,
+                                    float *hdr_ratio) {
+    IMX715_Context_t* pIMX715Ctx = (IMX715_Context_t*)handle;
+    RESULT result = RET_SUCCESS;
+    float long_it = 0.0;
+	float short_it = 0.0;
+	float long_exp_val = 0.0;
+	float short_exp_val = 0.0;
+	float long_gain = 1;
+	float short_gain = 1;
+	bool calculate_gain = false;
+	uint32_t rhs1;
+	uint32_t vmax = IMX715_VMAX_2DOL_HDR; 
+	bool optimize_gain = false;
+
+    if (pIMX715Ctx == NULL || o_long_it == NULL ||
+        o_long_gain == NULL || o_short_gain == NULL ||
+        hdr_ratio == NULL) {
+        printf("%s: Invalid parameter (NULL pointer detected)\n", __func__);
+        return (RET_NULL_POINTER);
+    }
+
+	if (pIMX715Ctx->cur_rhs1 == 0) {
+		TRACE(IMX715_ERROR, "%s: Invalid parameter (RHS1 not set)\n", __func__);
+		return (RET_WRONG_CONFIG);
+	}
+
+	rhs1 = pIMX715Ctx->cur_rhs1;
+
+    TRACE(IMX715_DEBUG, "%s: hdr_ratio[0] = LS Ratio = %f\n", 
+    __func__, hdr_ratio[0]);
+    
+    // Sometimes there is no actual input gain. In that case, we will read it from the sensor
+    if (NewGain == 0) {
+        TRACE(IMX715_DEBUG, "%s: Input NewGain is 0, reading gain from sensor\n", __func__);
+        result = IMX715_IsiGetSEF1GainIss(handle, &NewGain);
+        if (result != RET_SUCCESS) {
+            return result;
+        }
+        calculate_gain = true;
+    }
+
+    // Same for integration time
+    if (NewIntegrationTime == 0) {
+        TRACE(IMX715_DEBUG, "%s: Input NewIntegrationTime is 0, reading integration time from sensor\n", __func__);
+        result = IMX715_IsiGetSEF1IntegrationTimeIss(handle, &NewIntegrationTime);
+        if (result != RET_SUCCESS) {
+            return result;
+        }
+        calculate_gain = true;
+    }
+	
+    if(IMX715_ReadVmax(pIMX715Ctx, &vmax) != RET_SUCCESS){
+	    TRACE(IMX715_ERROR, "%s: unable to read vmax\n", __func__);
+    }
+
+    vmax *= IMX715_2DOL_NUM_EXP;
+
+    // assume gain is 1 and see if ratio can be achieved with integration time
+    long_it 		= NewIntegrationTime * hdr_ratio[0];
+    short_it 		= NewIntegrationTime;
+    
+    TRACE(IMX715_DEBUG, "%s: requested IT long: %f, short: %f\n", 
+    __func__, long_it, short_it);
+    long_exp_val 		= long_it / pIMX715Ctx->one_line_exp_time;
+    short_exp_val 		= short_it / pIMX715Ctx->one_line_exp_time;
+
+    TRACE(IMX715_DEBUG, "%s: requested IT in lines long: %f, short: %f\n", 
+    __func__, long_exp_val, short_exp_val);
+    long_exp_val 		= vmax - long_exp_val;
+    short_exp_val 		= rhs1 - short_exp_val;
+
+    TRACE(IMX715_DEBUG, "%s: requested IT in shr long: %f, short: %f\n",
+    __func__, long_exp_val, short_exp_val);
+    if(long_exp_val < rhs1 + IMX715_2DOL_SHR0_RHS1_GAP) {
+        long_exp_val = rhs1 + IMX715_2DOL_SHR0_RHS1_GAP;
+        long_it = (vmax - long_exp_val) * pIMX715Ctx->one_line_exp_time;
+        optimize_gain = true;
+        calculate_gain = true;
+        TRACE(IMX715_DEBUG, "%s: long_exp_val is too long, set to %u, new long_it = %f\n",
+        __func__, rhs1 + IMX715_2DOL_SHR0_RHS1_GAP, long_it);
+    } else if(long_exp_val > vmax - IMX715_2DOL_SHR0_FSC_GAP) {
+        long_exp_val = vmax - IMX715_2DOL_SHR0_FSC_GAP;
+        long_it = (vmax - long_exp_val) * pIMX715Ctx->one_line_exp_time;
+        calculate_gain = true;
+        TRACE(IMX715_DEBUG, "%s: long_exp_val is too short, set to %u, new long_it = %f\n",
+        __func__, vmax - IMX715_2DOL_SHR0_FSC_GAP, long_it);
+    }
+    if(short_exp_val < IMX715_2DOL_SHR1_MIN_GAP) {
+        short_exp_val = IMX715_2DOL_SHR1_MIN_GAP;
+        short_it = (rhs1 - short_exp_val) * pIMX715Ctx->one_line_exp_time;
+        calculate_gain = true;
+        TRACE(IMX715_DEBUG, "%s: short_exp_val is too long, set to %u, new short_it = %f\n",
+        __func__, IMX715_2DOL_SHR1_MIN_GAP, short_it);
+    } else if(short_exp_val > rhs1 - IMX715_2DOL_SHR1_RHS1_GAP) {
+        short_exp_val = rhs1 - IMX715_2DOL_SHR1_RHS1_GAP;
+        short_it = (rhs1 - short_exp_val) * pIMX715Ctx->one_line_exp_time;
+        calculate_gain = true;
+        TRACE(IMX715_DEBUG, "%s: short_exp_val is too short, set to %u, new short_it = %f\n",
+        __func__, rhs1 - IMX715_2DOL_SHR1_RHS1_GAP, short_it);
+    }
+
+    // need to use gain to achieve ratio / requested gain update
+    if(calculate_gain || NewGain != pIMX715Ctx->AecCurGainSEF1) {
+        float real_short_gain = _sensorGain2linear(_linear2sensorGain(NewGain));
+        long_gain = (short_it * real_short_gain * hdr_ratio[0]) / long_it;
+        if(optimize_gain){
+             long_gain = _sensorGain2linear(_linear2sensorGainCeil(long_gain));
+             long_it = (short_it * real_short_gain * hdr_ratio[0]) / long_gain;
+        }
+
+        short_gain = NewGain;
+        TRACE(IMX715_DEBUG, "%s: calculated gain: long: %f, short: %f\n",
+        __func__, long_gain, short_gain);
+    }
+
+    *o_long_it = long_it;
+    *o_short_it = short_it;
+    *o_long_gain = long_gain;
+    *o_short_gain = short_gain;
+
+    return RET_SUCCESS;
+}
+
 RESULT IMX715_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
                                     float NewIntegrationTime,
                                     uint8_t* pNumberOfFramesToSkip,
@@ -1706,15 +1970,23 @@ RESULT IMX715_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
             return result;
         }
 
-        pIMX715Ctx->SensorMode.ae_info.max_integration_time = pIMX715Ctx->cur_rhs1 - IMX715_SHR1_MIN_GAP;
         pIMX715Ctx->SensorMode.ae_info.one_line_exp_time_ns = (uint32_t)(((float)hmax / IMX715_PIXEL_CLK_RATE) * MICRO_2_NANO);
         pIMX715Ctx->one_line_exp_time =
         (float)(pIMX715Ctx->SensorMode.ae_info.one_line_exp_time_ns) / 1000000000;
 
-        result = IMX715_CalculateHDRExposures(handle, NewIntegrationTime, NewGain,
-                                    &long_it, &short_it, &very_short_it,
-                                    &long_gain, &short_gain, &very_short_gain,
+        if (pIMX715Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
+            //2exposure
+            result = IMX715_Calculate2DOLExposures(handle, NewIntegrationTime, NewGain,
+                                    &long_it, &short_it,
+                                    &long_gain, &short_gain,
                                     hdr_ratio);
+        } else {
+            //3exposure
+            result = IMX715_Calculate3DOLExposures(handle, NewIntegrationTime, NewGain,
+                                        &long_it, &short_it, &very_short_it,
+                                        &long_gain, &short_gain, &very_short_gain,
+                                        hdr_ratio);
+        }
         if (result != RET_SUCCESS) {
             TRACE(IMX715_ERROR, "%s: CalculateHDRExposures failed\n", __func__);
             return result;
@@ -1817,6 +2089,11 @@ RESULT IMX715_IsiSetFpsIss(IsiSensorHandle_t handle, uint32_t Fps) {
 
 RESULT IMX715_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode) {
     RESULT result = RET_SUCCESS;
+    uint32_t current_vmax = 0;
+    uint32_t requested_vmax = 0;
+    uint32_t shr = 0;
+    int exp = 0;
+
     IMX715_Context_t* pIMX715Ctx = (IMX715_Context_t*)handle;
 
     TRACE(IMX715_DEBUG, "%s: set sensor flickerMode = %d\n", __func__, flickerMode);
@@ -1824,7 +2101,65 @@ RESULT IMX715_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
     if (!pIMX715Ctx) {
         return RET_NULL_POINTER;
     }
-    return result;
+    if (pIMX715Ctx->flicker_fps_mode == flickerMode) {
+        return RET_SUCCESS;
+    }
+    if (pIMX715Ctx->enableHdr && (pIMX715Ctx->SensorMode.stitching_mode != SENSOR_STITCHING_L_AND_S)) {
+        return RET_SUCCESS;
+    }
+    if (flickerMode > ISI_AE_ANTIBANDING_MODE_AUTO) {
+        TRACE(IMX715_INFO, "%s: Invalid flickerMode (%d), setting ISI_AE_ANTIBANDING_MODE_AUTO instead.\n", __func__, flickerMode);
+        flickerMode = ISI_AE_ANTIBANDING_MODE_AUTO;
+    }
+    pIMX715Ctx->flicker_fps_mode = flickerMode;
+
+    result = IMX715_ReadVmax(handle, &current_vmax);
+    if (result != RET_SUCCESS) {
+        TRACE(IMX715_ERROR, "%s: Unable to read VMAX\n", __func__);
+        return (result);
+    }
+    if (pIMX715Ctx->original_vmax == 0) {
+        pIMX715Ctx->original_vmax = current_vmax;
+    }
+
+    exp = pIMX715Ctx->AecCurIntegrationTimeLEF / pIMX715Ctx->one_line_exp_time;
+    shr = MAX((int)current_vmax - exp, IMX715_MIN_SHR);
+
+    if (current_vmax > pIMX715Ctx->original_vmax) {
+        current_vmax = MAX((int)current_vmax - (int)shr + IMX715_MIN_SHR, IMX715_MIN_SHR);
+        shr = MAX((int)current_vmax - exp, IMX715_MIN_SHR);
+        pIMX715Ctx->unlimit_fps_vmax_changed = current_vmax > pIMX715Ctx->original_vmax && pIMX715Ctx->unlimit_fps;
+    }
+
+    requested_vmax = IMX715_getNewVmaxAntiFlicker(pIMX715Ctx, current_vmax);
+    requested_vmax = MAX( MIN(requested_vmax, IMX715_VMAX_MAX), 1);
+
+    if (current_vmax != requested_vmax) {
+        shr = MAX( (int)requested_vmax - (int)current_vmax + (int)shr , IMX715_MIN_SHR);
+        result |= IMX715_LockRegHold(handle);
+        result |= IMX715_WriteVmax(handle, requested_vmax);
+        result |= IMX715_WriteShr0(handle, shr);
+        result |= IMX715_UnlockRegHold(handle);
+        if (result != RET_SUCCESS) {
+            TRACE(IMX715_ERROR, "%s: Unable to write VMAX or Shr0\n", __func__);
+            return (result);
+        }
+        TRACE(IMX715_DEBUG, "%s - writing 0x%x to VMAX, writing 0x%x to SHR0\n", __func__, requested_vmax, shr);
+
+        float configuredIntegrationTime = (requested_vmax - shr) * pIMX715Ctx->one_line_exp_time;
+        pIMX715Ctx->OldIntegrationTime = configuredIntegrationTime;
+        pIMX715Ctx->AecCurIntegrationTimeLEF = configuredIntegrationTime;
+        TRACE(IMX715_DEBUG, "%s: Ti=%f\n", __func__, configuredIntegrationTime);
+    }
+
+    pIMX715Ctx->MaxIntegrationLine = MAX( MIN(requested_vmax - IMX715_MIN_SHR, IMX715_VMAX_MAX - IMX715_MIN_SHR), 1);
+    pIMX715Ctx->AecMaxIntegrationTime = pIMX715Ctx->one_line_exp_time * pIMX715Ctx->MaxIntegrationLine;
+
+    TRACE(IMX715_INFO, "%s: set sensor fps = %d\n", __func__,
+          pIMX715Ctx->CurrFps);
+
+    TRACE(IMX715_DEBUG, "%s: (exit)\n", __func__);
+    return (result);
 }
 
 RESULT IMX715_IsiGetAutoFpsInfoIss(IsiSensorHandle_t handle,

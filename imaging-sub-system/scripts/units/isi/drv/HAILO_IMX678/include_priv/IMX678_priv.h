@@ -109,7 +109,7 @@ typedef struct IMX678_Context_s
     uint32_t            cur_rhs1;
     uint32_t            cur_rhs2;
     int                 unlimit_fps;
-	int 				unlimit_fps_vmax_changed; 
+	int 				unlimit_fps_vmax_changed;
 	IsiSensorAntibandingMode_t flicker_fps_mode;
 
     uint16_t            FrameLengthLines;       /**< frame line length */
