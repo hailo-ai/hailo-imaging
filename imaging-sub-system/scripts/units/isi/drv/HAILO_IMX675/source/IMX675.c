@@ -35,6 +35,7 @@
 #include <linux/i2c-dev.h>
 #include <math.h>
 #include <sys/ioctl.h>
+#include <linux/i2c.h>
 
 #include "IMX675_priv.h"
 #include "vvsensor.h"
@@ -285,6 +286,11 @@ static RESULT IMX675_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     pIMX675Ctx->subdev = HalGetFdHandle(pConfig->HalHandle,
                                         HAL_MODULE_SENSOR);  // two sensors??
     pIMX675Ctx->KernelDriverFlag = 1;
+    TRACE(IMX675_INFO, "%s - sensor i2c bus: %d, af i2c bus: %d, sensor i2c addr: 0x%x, af i2c addr: 0x%x\n", __func__,
+           pConfig->I2cBusNum, pConfig->I2cAfBusNum, pConfig->SlaveAddr, pConfig->SlaveAfAddr);
+    pIMX675Ctx->i2c_addr = pConfig->SlaveAddr;
+    pIMX675Ctx->i2c_af_addr = pConfig->SlaveAfAddr;
+
     sprintf(i2c_file_path, "/dev/i2c-%d", pConfig->I2cBusNum);
     pIMX675Ctx->i2c_fd = open(i2c_file_path, O_RDWR);
     if (pIMX675Ctx->i2c_fd < 0) {
@@ -292,10 +298,24 @@ static RESULT IMX675_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
         return RET_FAILURE;
     }
 
-    if (ioctl(pIMX675Ctx->i2c_fd, I2C_SLAVE_FORCE, IMX675_I2C_ADDR) < 0) {
+    if (ioctl(pIMX675Ctx->i2c_fd, I2C_SLAVE_FORCE, pIMX675Ctx->i2c_addr) < 0) {
         TRACE(IMX675_INFO, "unable to set I2C_SLAVE_FORCE on /dev/i2c-%d\n",
               pConfig->I2cBusNum);
         return RET_FAILURE;
+    }
+
+    if (pConfig->I2cAfBusNum < 0) {
+        TRACE(IMX675_INFO, "no af i2c bus\n");
+        pIMX675Ctx->SensorMode.af_mode = ISI_SENSOR_AF_MODE_NOTSUPP;
+    } else {
+        sprintf(i2c_file_path, "/dev/i2c-%d", pConfig->I2cAfBusNum);
+        pIMX675Ctx->i2c_af_fd = open(i2c_file_path, O_RDWR);
+        if (pIMX675Ctx->i2c_af_fd < 0) {
+            TRACE(IMX675_INFO, "unable to open /dev/i2c-%d\n",
+                  pConfig->I2cAfBusNum);
+            return RET_FAILURE;
+        }
+        pIMX675Ctx->SensorMode.af_mode = ISI_SENSOR_AF_MODE_CDAF;
     }
 
     return (result);
@@ -320,20 +340,31 @@ static RESULT IMX675_IsiReadRegIss(IsiSensorHandle_t handle,
                                    const uint32_t Addr, uint32_t* pValue) {
     RESULT result = RET_SUCCESS;
     IMX675_Context_t* pIMX675Ctx = (IMX675_Context_t*)handle;
-    char out[IMX675_TRANSFER_BUFFER_LENGTH];
+    struct i2c_rdwr_ioctl_data ioctl_data;
+    unsigned char out[IMX675_TRANSFER_BUFFER_LENGTH];
+    struct i2c_msg msgs[2];
+    uint8_t addr_buf[2] = { (Addr >> 8) & 0xff, Addr & 0xff };
 
     if (pIMX675Ctx == NULL) {
         return (RET_WRONG_HANDLE);
     }
 
-    memset(out, 0, IMX675_TRANSFER_BUFFER_LENGTH);
-    out[0] = (Addr >> 8) & 0xff;
-    out[1] = Addr & 0xff;
-    if (write(pIMX675Ctx->i2c_fd, out, sizeof(uint16_t)) != sizeof(uint16_t)) {
+    msgs[0].addr = pIMX675Ctx->i2c_addr;
+    msgs[0].flags = 0; // Write
+    msgs[0].len = sizeof(addr_buf);
+    msgs[0].buf = addr_buf;
+
+    msgs[1].addr = pIMX675Ctx->i2c_addr;
+    msgs[1].flags = I2C_M_RD; // Read
+    msgs[1].len = 1;
+    msgs[1].buf = out;
+
+    ioctl_data.msgs = msgs;
+    ioctl_data.nmsgs = 2;
+
+    if (ioctl(pIMX675Ctx->i2c_fd, I2C_RDWR, &ioctl_data) < 0) {
         return RET_FAILURE;
     }
-
-    if (read(pIMX675Ctx->i2c_fd, out, 1) != 1) return RET_FAILURE;
 
     *pValue = out[0];
 
@@ -1030,7 +1061,7 @@ RESULT IMX675_IsiGetSEF1GainIss(IsiSensorHandle_t handle, float *pSetGain)
 
 	return (result);
 }
-
+#endif //BRINGUP_CONFIG
 RESULT IMX675_IsiGetSEF2GainIss(IsiSensorHandle_t handle, float *pSetGain)
 {
 	IMX675_Context_t *pIMX675Ctx = (IMX675_Context_t *)handle;
@@ -1056,7 +1087,7 @@ RESULT IMX675_IsiGetSEF2GainIss(IsiSensorHandle_t handle, float *pSetGain)
 
 	return (result);
 }
-#endif //BRINGUP_CONFIG
+
 
 RESULT IMX675_IsiGetGainIncrementIss(IsiSensorHandle_t handle, float* pIncr) {
     IMX675_Context_t* pIMX675Ctx = (IMX675_Context_t*)handle;
@@ -1295,6 +1326,7 @@ RESULT IMX675_IsiGetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 	TRACE(IMX675_DEBUG, "%s - returning %f\n", __func__, pIMX675Ctx->AecCurIntegrationTimeSEF1);
 	return (result);
 }
+#endif //BRINGUP_CONFIG
 
 RESULT IMX675_IsiGetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 					   float *pSetIntegrationTime)
@@ -1314,7 +1346,6 @@ RESULT IMX675_IsiGetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 	TRACE(IMX675_DEBUG, "%s - returning %f\n", __func__, pIMX675Ctx->AecCurIntegrationTimeSEF2);
 	return (result);
 }
-#endif //BRINGUP_CONFIG
 
 RESULT IMX675_IsiGetIntegrationTimeIncrementIss(IsiSensorHandle_t handle,
                                                 float* pIncr) {
@@ -2238,14 +2269,16 @@ RESULT IMX675_IsiGetSensorIss(IsiSensor_t* pIsiSensor) {
 		pIsiSensor->pIsiGetLongIntegrationTimeIss =			IMX675_IsiGetLEFIntegrationTimeIss;
 		pIsiSensor->pIsiGetIntegrationTimeIss =				IMX675_IsiGetIntegrationTimeIss;
 #ifndef BRINGUP_CONFIG
+		pIsiSensor->pIsiGetShortIntegrationTimeIss =		IMX675_IsiGetSEF1IntegrationTimeIss;
+#endif // BRINGUP_CONFIG
 		pIsiSensor->pIsiGetVSIntegrationTimeIss =			IMX675_IsiGetSEF2IntegrationTimeIss;
-#endif //BRINGUP_CONFIG
 
 		pIsiSensor->pIsiGetLongGainIss = 					IMX675_IsiGetLEFGainIss;
 		pIsiSensor->pIsiGetGainIss = 						IMX675_IsiGetGainIss;
 #ifndef BRINGUP_CONFIG
+		pIsiSensor->pIsiGetShortGainIss = 					IMX675_IsiGetSEF1GainIss;
+#endif // BRINGUP_CONFIG
 		pIsiSensor->pIsiGetVSGainIss = 						IMX675_IsiGetSEF2GainIss;
-#endif //BRINGUP_CONFIG
 
 		pIsiSensor->pIsiGetGainIncrementIss =				IMX675_IsiGetGainIncrementIss;
 		pIsiSensor->pIsiGetIrisIncrementIss =				IMX675_IsiGetIrisIncrementIss;

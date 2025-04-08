@@ -138,6 +138,9 @@ typedef struct IMX334_Context_s
     bool                enableHdr;
     uint8_t             pattern;
     int                 i2c_fd;
+    int                 i2c_af_fd;
+    uint32_t            i2c_addr;
+    uint32_t            i2c_af_addr;
 } IMX334_Context_t;
 
 static RESULT IMX334_IsiCreateIss(IsiSensorInstanceConfig_t *pConfig);

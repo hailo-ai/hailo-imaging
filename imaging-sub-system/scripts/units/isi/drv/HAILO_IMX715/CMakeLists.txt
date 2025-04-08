@@ -20,6 +20,7 @@ include_directories(
     ${LIB_ROOT}
     ${LIB_ROOT}/${CMAKE_BUILD_TYPE}/include
     ${CMAKE_SYSROOT}/usr/include/imaging
+    ../../shared_sensor_logic
     )
 # module specific defines
 ###add_definitions(-Wno-error=unused-function)
@@ -53,7 +54,7 @@ if( NOT DEFINED ISS_BUILD )
     endif()
     add_custom_target(${module}.init
                     ALL
-            COMMAND ${CMAKE_COMMAND} -E copy ${UNITS_TOP_DIRECTORY}/isi/drv/HAILO_IMX715/source/IMX715_mipi4lane_1080p_3dol_init.txt  ${LIB_ROOT}/${CMAKE_BUILD_TYPE}/bin/HAILO_IMX715_mipi4lane_1080p_3dol_init.txt
+            COMMAND ${CMAKE_COMMAND} -E copy ${UNITS_TOP_DIRECTORY}/isi/drv/hailo/HAILO_IMX715/source/IMX715_mipi4lane_1080p_3dol_init.txt  ${LIB_ROOT}/${CMAKE_BUILD_TYPE}/bin/HAILO_IMX715_mipi4lane_1080p_3dol_init.txt
             DEPENDS ${module}_shared
                     COMMENT "Copying ${module} init files"
                     )

@@ -36,6 +36,7 @@
 #include <linux/i2c-dev.h>
 #include <math.h>
 #include <sys/ioctl.h>
+#include <linux/i2c.h>
 
 #include "IMX334_priv.h"
 #include "vvsensor.h"
@@ -143,6 +144,11 @@ static RESULT IMX334_IsiCreateIss(IsiSensorInstanceConfig_t *pConfig) {
     pIMX334Ctx->subdev = HalGetFdHandle(pConfig->HalHandle,
                                         HAL_MODULE_SENSOR);  // two sensors??
     pIMX334Ctx->KernelDriverFlag = 1;
+    TRACE(IMX334_INFO, "%s - sensor i2c bus: %d, af i2c bus: %d, sensor i2c addr: 0x%x, af i2c addr: 0x%x\n", __func__,
+           pConfig->I2cBusNum, pConfig->I2cAfBusNum, pConfig->SlaveAddr, pConfig->SlaveAfAddr);
+    pIMX334Ctx->i2c_addr = pConfig->SlaveAddr;
+    pIMX334Ctx->i2c_af_addr = pConfig->SlaveAfAddr;
+
     sprintf(i2c_file_path, "/dev/i2c-%d", pConfig->I2cBusNum);
     pIMX334Ctx->i2c_fd = open(i2c_file_path, O_RDWR);
     if (pIMX334Ctx->i2c_fd < 0) {
@@ -150,12 +156,25 @@ static RESULT IMX334_IsiCreateIss(IsiSensorInstanceConfig_t *pConfig) {
         return RET_FAILURE;
     }
 
-    if (ioctl(pIMX334Ctx->i2c_fd, I2C_SLAVE_FORCE, IMX334_I2C_ADDR) < 0) {
+    if (ioctl(pIMX334Ctx->i2c_fd, I2C_SLAVE_FORCE, pIMX334Ctx->i2c_addr) < 0) {
         TRACE(IMX334_INFO, "unable to set I2C_SLAVE_FORCE on /dev/i2c-%d\n",
               pConfig->I2cBusNum);
         return RET_FAILURE;
     }
 
+    if (pConfig->I2cAfBusNum < 0) {
+        TRACE(IMX334_INFO, "no af i2c bus\n");
+        pIMX334Ctx->SensorMode.af_mode = ISI_SENSOR_AF_MODE_NOTSUPP;
+    } else {
+        sprintf(i2c_file_path, "/dev/i2c-%d", pConfig->I2cAfBusNum);
+        pIMX334Ctx->i2c_af_fd = open(i2c_file_path, O_RDWR);
+        if (pIMX334Ctx->i2c_af_fd < 0) {
+            TRACE(IMX334_INFO, "unable to open /dev/i2c-%d\n",
+                  pConfig->I2cAfBusNum);
+            return RET_FAILURE;
+        }
+        pIMX334Ctx->SensorMode.af_mode = ISI_SENSOR_AF_MODE_CDAF;
+    }
     return (result);
 }
 
@@ -178,20 +197,31 @@ static RESULT IMX334_IsiReadRegIss(IsiSensorHandle_t handle,
                                    const uint32_t Addr, uint32_t *pValue) {
     RESULT result = RET_SUCCESS;
     IMX334_Context_t *pIMX334Ctx = (IMX334_Context_t *)handle;
-    char out[IMX334_TRANSFER_BUFFER_LENGTH];
+    struct i2c_rdwr_ioctl_data ioctl_data;
+    unsigned char out[IMX334_TRANSFER_BUFFER_LENGTH];
+    struct i2c_msg msgs[2];
+    uint8_t addr_buf[2] = { (Addr >> 8) & 0xff, Addr & 0xff };
 
     if (pIMX334Ctx == NULL) {
         return (RET_WRONG_HANDLE);
     }
 
-    memset(out, 0, IMX334_TRANSFER_BUFFER_LENGTH);
-    out[0] = (Addr >> 8) & 0xff;
-    out[1] = Addr & 0xff;
-    if (write(pIMX334Ctx->i2c_fd, out, sizeof(uint16_t)) != sizeof(uint16_t)) {
+    msgs[0].addr = pIMX334Ctx->i2c_addr;
+    msgs[0].flags = 0; // Write
+    msgs[0].len = sizeof(addr_buf);
+    msgs[0].buf = addr_buf;
+
+    msgs[1].addr = pIMX334Ctx->i2c_addr;
+    msgs[1].flags = I2C_M_RD; // Read
+    msgs[1].len = 1;
+    msgs[1].buf = out;
+
+    ioctl_data.msgs = msgs;
+    ioctl_data.nmsgs = 2;
+
+    if (ioctl(pIMX334Ctx->i2c_fd, I2C_RDWR, &ioctl_data) < 0) {
         return RET_FAILURE;
     }
-
-    if (read(pIMX334Ctx->i2c_fd, out, 1) != 1) return RET_FAILURE;
 
     *pValue = out[0];
 

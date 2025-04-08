@@ -1094,7 +1094,7 @@
                      ISP_DPCC_MODE
                   </name>
                   <value index="1" type="char" size="[1 6]">
-                     0x0004
+                     0x0005
                   </value>
                </cell>
                <cell index="2" type="struct" size="[1 1]">
@@ -1110,7 +1110,7 @@
                      ISP_DPCC_SET_USE
                   </name>
                   <value index="1" type="char" size="[1 6]">
-                     0x0007
+                     0x0003
                   </value>
                </cell>
                <cell index="4" type="struct" size="[1 1]">
@@ -1158,7 +1158,7 @@
                      ISP_DPCC_PG_FAC_1
                   </name>
                   <value index="1" type="char" size="[1 6]">
-                     0x0403
+                     0x0806
                   </value>
                </cell>
                <cell index="10" type="struct" size="[1 1]">
@@ -1198,7 +1198,7 @@
                      ISP_DPCC_PG_FAC_2
                   </name>
                   <value index="1" type="char" size="[1 6]">
-                     0x0403
+                     0x0806
                   </value>
                </cell>
                <cell index="15" type="struct" size="[1 1]">
@@ -1238,7 +1238,7 @@
                      ISP_DPCC_PG_FAC_3
                   </name>
                   <value index="1" type="char" size="[1 6]">
-                     0x0403
+                     0x0A0A
                   </value>
                </cell>
                <cell index="20" type="struct" size="[1 1]">
@@ -1262,7 +1262,7 @@
                      ISP_DPCC_RO_LIMITS
                   </name>
                   <value index="1" type="char" size="[1 6]">
-                     0x0A0A
+                     0x09FA
                   </value>
                </cell>
                <cell index="23" type="struct" size="[1 1]">

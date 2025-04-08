@@ -101,8 +101,8 @@ typedef struct IMX678_Context_s
     bool_t              isAfpsRun;              /**< if true, just do anything required for Afps parameter calculation, but DON'T access SensorHW! */
 
     float               one_line_exp_time;
-    uint32_t            MaxIntegrationLine;
-    uint16_t            MinIntegrationLine;
+    uint32_t            MaxIntegrationLine;		/* max exposure time for long frame */
+    uint16_t            MinIntegrationLine;		/* min exposure time for long frame */
     uint32_t            gain_accuracy;
 
     uint32_t            original_vmax;
@@ -145,6 +145,9 @@ typedef struct IMX678_Context_s
     bool                enableHdr;
     uint8_t             pattern;
     int                 i2c_fd;
+    int                 i2c_af_fd;
+    uint32_t            i2c_addr;
+    uint32_t            i2c_af_addr;
 } IMX678_Context_t;
 
 
