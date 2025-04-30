@@ -26,7 +26,6 @@ include_directories(
     ${LIB_ROOT}
     ${LIB_ROOT}/${CMAKE_BUILD_TYPE}/include
     ${CMAKE_SYSROOT}/usr/include/imaging
-    ../shared_sensor_logic
     )
 
 # module specific defines
