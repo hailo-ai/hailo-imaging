@@ -1217,7 +1217,7 @@ RESULT IMX715_IsiSetGainIss(IsiSensorHandle_t handle, float NewGain,
 }
 
 static inline uint32_t _linear2sensorGain(float gain)
-{
+{    
     uint32_t db = 0;
     float log_gain = log10(gain);
     log_gain = (log_gain * 10 * 20) / 3;
@@ -1357,10 +1357,10 @@ RESULT IMX715_IsiGetIntegrationTimeIss(IsiSensorHandle_t handle,
 		return (RET_NULL_POINTER);
 	
 	TRACE(IMX715_DEBUG, "%s - enter\n", __func__);
-
+	
 	if (pIMX715Ctx->enableHdr)
 		return IMX715_IsiGetSEF1IntegrationTimeIss(handle, pSetIntegrationTime);
-
+	
 	return IMX715_IsiGetLEFIntegrationTimeIss(handle, pSetIntegrationTime);
 }
 
@@ -1781,20 +1781,20 @@ RESULT IMX715_Calculate3DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
     long_it 		= NewIntegrationTime * hdr_ratio[0];
     short_it 		= NewIntegrationTime;
     very_short_it 	= NewIntegrationTime / hdr_ratio[1];
-
-    TRACE(IMX715_DEBUG, "%s: requested IT long: %f, short: %f, very_short: %f\n",
+    
+    TRACE(IMX715_DEBUG, "%s: requested IT long: %f, short: %f, very_short: %f\n", 
     __func__, long_it, short_it, very_short_it);
     long_exp_val 		= long_it / pIMX715Ctx->one_line_exp_time;
     short_exp_val 		= short_it / pIMX715Ctx->one_line_exp_time;
     very_short_exp_val 	= very_short_it / pIMX715Ctx->one_line_exp_time;
 
-    TRACE(IMX715_DEBUG, "%s: requested IT in lines long: %f, short: %f, very_short: %f\n",
+    TRACE(IMX715_DEBUG, "%s: requested IT in lines long: %f, short: %f, very_short: %f\n", 
     __func__, long_exp_val, short_exp_val, very_short_exp_val);
     long_exp_val 		= IMX715_VMAX_3DOL_HDR - long_exp_val;
     short_exp_val 		= rhs1 - short_exp_val;
     very_short_exp_val 	= rhs2 - very_short_exp_val;
 
-    TRACE(IMX715_DEBUG, "%s: requested IT in shr long: %f, short: %f, very_short: %f\n",
+    TRACE(IMX715_DEBUG, "%s: requested IT in shr long: %f, short: %f, very_short: %f\n", 
     __func__, long_exp_val, short_exp_val, very_short_exp_val);
     if(long_exp_val < rhs2 + IMX715_SHR0_RHS2_GAP) {
         long_exp_val = rhs2 + IMX715_SHR0_RHS2_GAP;
@@ -1869,7 +1869,7 @@ RESULT IMX715_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 	float short_gain = 1;
 	bool calculate_gain = false;
 	uint32_t rhs1;
-	uint32_t vmax = IMX715_VMAX_2DOL_HDR;
+	uint32_t vmax = IMX715_VMAX_2DOL_HDR; 
 	bool optimize_gain = false;
 
     if (pIMX715Ctx == NULL || o_long_it == NULL ||
@@ -1886,7 +1886,7 @@ RESULT IMX715_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 
 	rhs1 = pIMX715Ctx->cur_rhs1;
 
-    TRACE(IMX715_DEBUG, "%s: hdr_ratio[0] = LS Ratio = %f\n",
+    TRACE(IMX715_DEBUG, "%s: hdr_ratio[0] = LS Ratio = %f\n", 
     __func__, hdr_ratio[0]);
     
     // Sometimes there is no actual input gain. In that case, we will read it from the sensor
@@ -1908,7 +1908,7 @@ RESULT IMX715_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
         }
         calculate_gain = true;
     }
-
+	
     if(IMX715_ReadVmax(pIMX715Ctx, &vmax) != RET_SUCCESS){
 	    TRACE(IMX715_ERROR, "%s: unable to read vmax\n", __func__);
     }
@@ -1918,13 +1918,13 @@ RESULT IMX715_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
     // assume gain is 1 and see if ratio can be achieved with integration time
     long_it 		= NewIntegrationTime * hdr_ratio[0];
     short_it 		= NewIntegrationTime;
-
-    TRACE(IMX715_DEBUG, "%s: requested IT long: %f, short: %f\n",
+    
+    TRACE(IMX715_DEBUG, "%s: requested IT long: %f, short: %f\n", 
     __func__, long_it, short_it);
     long_exp_val 		= long_it / pIMX715Ctx->one_line_exp_time;
     short_exp_val 		= short_it / pIMX715Ctx->one_line_exp_time;
 
-    TRACE(IMX715_DEBUG, "%s: requested IT in lines long: %f, short: %f\n",
+    TRACE(IMX715_DEBUG, "%s: requested IT in lines long: %f, short: %f\n", 
     __func__, long_exp_val, short_exp_val);
     long_exp_val 		= vmax - long_exp_val;
     short_exp_val 		= rhs1 - short_exp_val;
