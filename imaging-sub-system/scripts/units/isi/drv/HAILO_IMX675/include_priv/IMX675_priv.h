@@ -46,9 +46,6 @@
 #include <isi/isi_common.h>
 #include "vvsensor.h"
 
-// TODO: Remove this line when the driver is fully implemented (all modes supported, including HDR)
-#define BRINGUP_CONFIG
-
 #ifndef NDEBUG
 #include "log.h"
 #define LOGTAG "HAILO_IMX675"
@@ -111,7 +108,9 @@ typedef struct IMX675_Context_s
     uint32_t            original_vmax;
     uint32_t            cur_rhs1;
     uint32_t            cur_rhs2;
-    int                 unlimit_fps;       
+    int                 unlimit_fps;
+    int 				unlimit_fps_vmax_changed;
+	IsiSensorAntibandingMode_t flicker_fps_mode;
 
     uint16_t            FrameLengthLines;       /**< frame line length */
     uint16_t            CurFrameLengthLines;
@@ -134,6 +133,7 @@ typedef struct IMX675_Context_s
     float               AecCurIntegrationTimeSEF1;
     float               AecCurGainSEF2;
     float               AecCurIntegrationTimeSEF2;
+    bool				hcg;
 
     bool                GroupHold;
     uint32_t            OldGain;
@@ -177,7 +177,6 @@ static RESULT IMX675_IsiSetIrisLimitsIss(IsiSensorHandle_t handle,
 								float minIris, 
 								float maxIris);
 
-
 static RESULT IMX675_IsiGetIntegrationTimeLimitsIss(IsiSensorHandle_t handle, 
 								float *pMinIntegrationTime,
 								float *pMaxIntegrationTime);
@@ -202,11 +201,9 @@ static RESULT IMX675_IsiGetGainIss(IsiSensorHandle_t handle,float *pSetGain);
 
 static RESULT IMX675_IsiGetLEFGainIss(IsiSensorHandle_t handle,float *pSetGain);
 
-#ifndef BRINGUP_CONFIG
 static RESULT IMX675_IsiGetSEF1GainIss(IsiSensorHandle_t handle,float *pSetGain);
 
 static RESULT IMX675_IsiGetSEF2GainIss(IsiSensorHandle_t handle,float *pSetGain);
-#endif //BRINGUP_CONFIG
 
 static RESULT IMX675_IsiGetGainIncrementIss(IsiSensorHandle_t handle,float *pIncr);
 
@@ -220,7 +217,6 @@ static RESULT IMX675_IsiSetLEFGainIss(IsiSensorHandle_t handle,
 								float *pSetGain,
 								float *hdr_ratio);
 
-#ifndef BRINGUP_CONFIG
 static RESULT IMX675_IsiSetSEF1GainIss(IsiSensorHandle_t handle,
 								float NewIntegrationTime,
 								float NewGain, 
@@ -232,7 +228,6 @@ static RESULT IMX675_IsiSetSEF2GainIss(IsiSensorHandle_t handle,
 								float NewGain, 
 								float *pSetGain,
 								float *hdr_ratio);
-#endif //BRINGUP_CONFIG
 
 static RESULT IMX675_IsiGetIntegrationTimeIss(IsiSensorHandle_t handle,
 								float *pSetIntegrationTime);
@@ -240,13 +235,11 @@ static RESULT IMX675_IsiGetIntegrationTimeIss(IsiSensorHandle_t handle,
 static RESULT IMX675_IsiGetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
 								float *pSetIntegrationTime);
 
-#ifndef BRINGUP_CONFIG
 static RESULT IMX675_IsiGetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 								float *pSetIntegrationTime);
 
 static RESULT IMX675_IsiGetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 								float *pSetIntegrationTime);
-#endif //BRINGUP_CONFIG
 
 static RESULT IMX675_IsiGetIntegrationTimeIncrementIss(IsiSensorHandle_t handle,
 								float *pIncr);
@@ -263,7 +256,6 @@ static RESULT IMX675_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
 								uint8_t *pNumberOfFramesToSkip,
 								float *hdr_ratio);
 
-#ifndef BRINGUP_CONFIG
 static RESULT IMX675_IsiSetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 								float NewIntegrationTime,
 								float *pSetIntegrationTime,
@@ -275,8 +267,16 @@ static RESULT IMX675_IsiSetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 								float *pSetIntegrationTime,
 								uint8_t *pNumberOfFramesToSkip,
 								float *hdr_ratio);
-#endif //BRINGUP_CONFIG
 
+static RESULT IMX675_IsiSetHCGIss(IsiSensorHandle_t handle,
+								bool hcg);
+
+static RESULT IMX675_IsiGetHCGIss(IsiSensorHandle_t handle,
+								bool *phcg);
+
+static RESULT IMX675_IsiGetHdrBlankingLinesIss(IsiSensorHandle_t handle,
+                                uint32_t *pBlankingLines, 
+                                size_t elementCount);
 
 #ifdef __cplusplus
 }

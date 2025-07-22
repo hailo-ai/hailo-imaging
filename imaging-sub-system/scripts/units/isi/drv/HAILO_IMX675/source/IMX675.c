@@ -35,10 +35,10 @@
 #include <linux/i2c-dev.h>
 #include <math.h>
 #include <sys/ioctl.h>
-#include <linux/i2c.h>
 
 #include "IMX675_priv.h"
 #include "vvsensor.h"
+#include <linux/i2c.h>
 
 
 CREATE_TRACER(IMX675_INFO, "IMX675: ", INFO, 1);
@@ -54,32 +54,58 @@ CREATE_TRACER(IMX675_REG_DEBUG, "IMX675: ", INFO, 1);
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 
+/* I2C */
 #define IMX675_I2C_ADDR 0x1a
+#define IMX675_TRANSFER_BUFFER_LENGTH 3
+
+/* AE */
+#define IMX675_MIN_SHR 4 // Min value of SHR0 in the software reference manual
 #define IMX675_IRIS_MIN_VAL 1
 #define IMX675_IRIS_MAX_VAL 1
+#define IMX675_EXP_MIN_LINES 1
+#define IMX675_MAX_GAIN 3981
 #define IMX675_MIN_GAIN_STEP                                          \
     (0.035) /**< min gain step size used by GUI (hardware min = 1/16; \
                1/16..32/16 depending on actual gain ) */
-#define IMX675_VMAX_30FPS 2200 // 0x898
-// #define IMX675_VMAX_3DOL_HDR 6750
-// #define IMX675_VMAX_2DOL_HDR 6750
-#define IMX675_VMAX_MAX ((1 << 20) - 2) // max even value of unsigned 20 bits - 1048574
-#define IMX675_MIN_SHR 4 // Min value of SHR0 in the software reference manual
-#define IMX675_TRANSFER_BUFFER_LENGTH 3
-#define IMX675_MAX_GAIN 3981
-// #define IMX675_SHR0_RHS2_GAP 7
-// #define IMX675_2DOL_SHR0_RHS1_GAP 5
-// #define IMX675_SHR0_FSC_GAP 3
-// #define IMX675_2DOL_SHR0_FSC_GAP 2
-// #define IMX675_3DOL_SHR1_RHS1_GAP 7
-// #define IMX675_2DOL_SHR1_MIN_GAP 5
-// #define IMX675_SHR1_RHS1_GAP 3
-// #define IMX675_2DOL_SHR1_RHS1_GAP 5
-// #define IMX675_SHR2_RHS1_GAP 7
-// #define IMX675_SHR2_RHS2_GAP 3
-// #define IMX675_PIXEL_CLK_RATE 74.25
-// #define DEFAULT_RHS1 0x91
-// #define MICRO_2_NANO 1000
+
+/* HDR */
+#define IMX675_2DOL_RHS1 0x7D
+
+#define IMX675_2DOL_NUM_EXP 2
+#define IMX675_3DOL_NUM_EXP 3
+
+#define IMX675_VMAX_MAX ((1 << 20) - 2) // max even value of unsigned 20 bits
+#define IMX675_SDR_VMAX_30FPS 0x898 // 2200
+#define IMX675_HDR_VMAX_30FPS 0x804 // 2052
+#define IMX675_SDR_FSC  IMX675_SDR_VMAX_30FPS // Frame Set Count
+#define IMX675_2DOL_FSC (IMX675_HDR_VMAX_30FPS * IMX675_2DOL_NUM_EXP)
+#define IMX675_3DOL_FSC (IMX675_HDR_VMAX_30FPS * IMX675_3DOL_NUM_EXP)
+
+#define IMX675_PLL_PCLK 74250000
+#define IMX675_SDR_HMAX 0x465 // 1125
+#define IMX675_2DOL_HMAX 0x25A // 602
+
+#define HMAX_TO_ONE_LINE_EXP_NS(hmax)       (((unsigned long long)(hmax) * 1000000000ULL) / IMX675_PLL_PCLK)
+#define IMX675_SDR_ONE_LINE_EXP_TIME_NS     HMAX_TO_ONE_LINE_EXP_NS(IMX675_SDR_HMAX) // 15151 ns
+#define IMX675_2DOL_ONE_LINE_EXP_TIME_NS    HMAX_TO_ONE_LINE_EXP_NS(IMX675_2DOL_HMAX) // 8107 ns
+
+/* gaps */
+#define IMX675_2DOL_SMALL_GAP 2
+#define IMX675_2DOL_LARGE_GAP 5
+#define IMX675_3DOL_SMALL_GAP 3
+#define IMX675_3DOL_LARGE_GAP 7
+
+#define IMX675_2DOL_SHR0_RHS1_GAP   IMX675_2DOL_LARGE_GAP
+#define IMX675_2DOL_SHR0_FSC_GAP    IMX675_2DOL_SMALL_GAP
+#define IMX675_2DOL_SHR1_MIN_GAP    IMX675_2DOL_LARGE_GAP
+#define IMX675_2DOL_SHR1_RHS1_GAP   IMX675_2DOL_SMALL_GAP
+
+#define IMX675_3DOL_SHR0_RHS2_GAP   IMX675_3DOL_LARGE_GAP
+#define IMX675_3DOL_SHR0_FSC_GAP    IMX675_3DOL_SMALL_GAP
+#define IMX675_3DOL_SHR1_MIN_GAP    IMX675_3DOL_LARGE_GAP
+#define IMX675_3DOL_SHR1_RHS1_GAP   IMX675_3DOL_SMALL_GAP
+#define IMX675_3DOL_SHR2_RHS1_GAP   IMX675_3DOL_LARGE_GAP
+#define IMX675_3DOL_SHR2_RHS2_GAP   IMX675_3DOL_SMALL_GAP
 
 
 FlickerModePeaksPerSec flickerPeaksPerSecMap[] = {
@@ -116,8 +142,8 @@ static struct vvsensor_mode_s pimx675_mode_info[] = {
 	.bit_width = 12,
 	.bayer_pattern = BAYER_RGGB,
 	.ae_info = {
-		.one_line_exp_time_ns = 7410,
-		.max_integration_time = IMX675_VMAX_30FPS - IMX675_MIN_SHR,
+		.one_line_exp_time_ns = IMX675_SDR_ONE_LINE_EXP_TIME_NS,
+		.max_integration_time = IMX675_SDR_FSC - IMX675_MIN_SHR,
 		.min_integration_time = 1,
 		.integration_accuracy = 1,
 		.max_gain = IMX675_MAX_GAIN,
@@ -126,7 +152,6 @@ static struct vvsensor_mode_s pimx675_mode_info[] = {
 		.cur_fps = 30
 	}
     },
-#ifndef BRINGUP_CONFIG
     // Same as previous, except for the resolution (FHD)
     {
         .index     = 1,
@@ -144,7 +169,7 @@ static struct vvsensor_mode_s pimx675_mode_info[] = {
 	.bayer_pattern = BAYER_RGGB,
 	.ae_info = {
 		.one_line_exp_time_ns = 7410,
-		.max_integration_time = IMX675_VMAX_30FPS - IMX675_MIN_SHR,
+		.max_integration_time = IMX675_SDR_FSC - IMX675_MIN_SHR,
 		.min_integration_time = 1,
 		.integration_accuracy = 1,
 		.max_gain = IMX675_MAX_GAIN,
@@ -153,7 +178,7 @@ static struct vvsensor_mode_s pimx675_mode_info[] = {
 		.cur_fps = 30
 	}
     },
-    // HDR 3DOL
+    // HDR 3DOL (FHD) - not implemented
     {
         .index     = 2,
         .size      ={
@@ -171,7 +196,7 @@ static struct vvsensor_mode_s pimx675_mode_info[] = {
 		.bayer_pattern = BAYER_RGGB,
         .ae_info = {
 		.one_line_exp_time_ns = 7410,
-		.max_integration_time = DEFAULT_RHS1 - IMX675_3DOL_SHR1_RHS1_GAP,
+		.max_integration_time = IMX675_2DOL_RHS1 - IMX675_3DOL_SHR1_RHS1_GAP,
 		.min_integration_time = 1,
 		.integration_accuracy = 1,
 		.max_gain = IMX675_MAX_GAIN,
@@ -180,7 +205,7 @@ static struct vvsensor_mode_s pimx675_mode_info[] = {
 		.cur_fps = 20
 	}
     },
-    // Same as previous, except for the resolution (FHD)
+    // Same as previous, except for the resolution (Recommended resolution)
     {
         .index     = 3,
         .size      ={
@@ -198,7 +223,7 @@ static struct vvsensor_mode_s pimx675_mode_info[] = {
 		.bayer_pattern = BAYER_RGGB,
         .ae_info = {
 		.one_line_exp_time_ns = 7410,
-		.max_integration_time = DEFAULT_RHS1 - IMX675_3DOL_SHR1_RHS1_GAP,
+		.max_integration_time = IMX675_2DOL_RHS1 - IMX675_3DOL_SHR1_RHS1_GAP,
 		.min_integration_time = 1,
 		.integration_accuracy = 1,
 		.max_gain = IMX675_MAX_GAIN,
@@ -224,8 +249,8 @@ static struct vvsensor_mode_s pimx675_mode_info[] = {
 		.bit_width = 12,
 		.bayer_pattern = BAYER_RGGB,
         .ae_info = {
-		.one_line_exp_time_ns = 7410,
-		.max_integration_time = DEFAULT_RHS1 - IMX675_2DOL_SHR1_RHS1_GAP,
+		.one_line_exp_time_ns = IMX675_2DOL_ONE_LINE_EXP_TIME_NS,
+		.max_integration_time = IMX675_2DOL_RHS1 - IMX675_2DOL_SHR1_RHS1_GAP,
 		.min_integration_time = 1,
 		.integration_accuracy = 1,
 		.max_gain = IMX675_MAX_GAIN,
@@ -234,7 +259,6 @@ static struct vvsensor_mode_s pimx675_mode_info[] = {
 		.cur_fps = 30
 	}
     }
-#endif // BRINGUP_CONFIG
 };
 
 static RESULT IMX675_IsiSetPowerIss(IsiSensorHandle_t handle, bool_t on)
@@ -413,7 +437,6 @@ static RESULT IMX675_ReadVmax(IsiSensorHandle_t handle, uint32_t* vmax) {
     return result;
 }
 
-#ifndef BRINGUP_CONFIG
 static RESULT IMX675_ReadHmax(IsiSensorHandle_t handle, uint32_t* hmax) {
     uint32_t hmax_low = 0, hmax_high = 0;
     RESULT result;
@@ -425,7 +448,6 @@ static RESULT IMX675_ReadHmax(IsiSensorHandle_t handle, uint32_t* hmax) {
     *hmax = (hmax_high << 8) | hmax_low;
     return result;
 }
-#endif // BRINGUP_CONFIG
 
 static RESULT IMX675_WriteVmax(IsiSensorHandle_t handle, uint32_t vmax) {
     RESULT result;
@@ -440,7 +462,6 @@ static RESULT IMX675_WriteVmax(IsiSensorHandle_t handle, uint32_t vmax) {
     return result;
 }
 
-#ifndef BRINGUP_CONFIG
 static RESULT IMX675_ReadRHS1(IsiSensorHandle_t handle, uint32_t* rhs1) {
     uint32_t rhs1_low = 0, rhs1_mid = 0, rhs1_high = 0;
     RESULT result;
@@ -466,7 +487,6 @@ static RESULT IMX675_ReadRHS2(IsiSensorHandle_t handle, uint32_t* rhs2) {
     *rhs2 = (rhs2_high << 16) | (rhs2_mid << 8) | rhs2_low;
     return result;
 }
-#endif // BRINGUP_CONFIG
 
 static RESULT IMX675_WriteShr0(IsiSensorHandle_t handle, uint32_t shr) {
     RESULT result;
@@ -478,7 +498,6 @@ static RESULT IMX675_WriteShr0(IsiSensorHandle_t handle, uint32_t shr) {
     return result;
 }
 
-#ifndef BRINGUP_CONFIG
 static RESULT IMX675_WriteShr1(IsiSensorHandle_t handle, uint32_t shr) {
     RESULT result;
 
@@ -498,7 +517,6 @@ static RESULT IMX675_WriteShr2(IsiSensorHandle_t handle, uint32_t shr) {
 
     return result;
 }
-#endif // BRINGUP_CONFIG
 
 static RESULT IMX675_WriteGain(IsiSensorHandle_t handle, uint32_t gain) {
     RESULT result;
@@ -509,7 +527,6 @@ static RESULT IMX675_WriteGain(IsiSensorHandle_t handle, uint32_t gain) {
     return result;
 }
 
-#ifndef BRINGUP_CONFIG
 static RESULT IMX675_WriteGain1(IsiSensorHandle_t handle, uint32_t gain) {
     RESULT result;
 
@@ -527,7 +544,6 @@ static RESULT IMX675_WriteGain2(IsiSensorHandle_t handle, uint32_t gain) {
 
     return result;
 }
-#endif // BRINGUP_CONFIG
 
 static RESULT IMX675_LockRegHold(IsiSensorHandle_t handle) {
     RESULT result;
@@ -717,12 +733,7 @@ static RESULT IMX675_IsiSetupIss(IsiSensorHandle_t handle,
     }
 
     if (pIMX675Ctx->SensorMode.hdr_mode != SENSOR_MODE_LINEAR) {
-#ifndef BRINGUP_CONFIG
         pIMX675Ctx->enableHdr = true;
-#else
-        printf("%s: HDR mode not supported yet!\n", __func__);
-        return -EINVAL;
-#endif
     } else {
         pIMX675Ctx->enableHdr = false;
     }
@@ -747,6 +758,8 @@ static RESULT IMX675_IsiSetupIss(IsiSensorHandle_t handle,
 
     pIMX675Ctx->original_vmax = 0;
     pIMX675Ctx->unlimit_fps = 0;
+    pIMX675Ctx->unlimit_fps_vmax_changed = 0;
+    pIMX675Ctx->flicker_fps_mode = ISI_AE_ANTIBANDING_MODE_OFF;
 
     pIMX675Ctx->MaxFps = pIMX675Ctx->SensorMode.fps;
     pIMX675Ctx->CurrFps = pIMX675Ctx->MaxFps;
@@ -858,6 +871,97 @@ static RESULT IMX675_IsiGetGainLimitsIss(IsiSensorHandle_t handle,
     return (result);
 }
 
+static inline int IMX675_getFlickerPeaksPerSec(IsiSensorAntibandingMode_t mode) {
+    int num_modes = sizeof(flickerPeaksPerSecMap) / sizeof(FlickerModePeaksPerSec);
+    for (int i = 0; i < num_modes; i++) {
+        if (flickerPeaksPerSecMap[i].mode == mode) {
+            return flickerPeaksPerSecMap[i].value;
+        }
+    }
+    return 0; // Defaults to 0 if mode not found
+}
+
+static size_t IMX675_GetNumExposures(IMX675_Context_t* pIMX675Ctx) {
+    if (pIMX675Ctx == NULL) {
+        return 0;
+    }
+
+    if (pIMX675Ctx->SensorMode.hdr_mode == SENSOR_MODE_LINEAR) {
+        return 1; // SDR
+    } else if (pIMX675Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
+        return IMX675_2DOL_NUM_EXP;
+    } else if (pIMX675Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
+        return IMX675_3DOL_NUM_EXP;
+    } else {
+        TRACE(IMX675_ERROR, "%s: Unsupported HDR mode %d with stitching mode %d\n",
+              pIMX675Ctx->SensorMode.hdr_mode, pIMX675Ctx->SensorMode.stitching_mode);
+        return 0;
+    }
+}
+
+static RESULT IMX675_UpdateCurrLEFIntegrationTimeFromFsc(IMX675_Context_t* pIMX675Ctx, uint32_t fsc, uint32_t shr0) {
+    if (pIMX675Ctx == NULL) {
+        return RET_NULL_POINTER;
+    }
+
+    float configuredIntegrationTime = (fsc - shr0) * pIMX675Ctx->one_line_exp_time;
+
+    pIMX675Ctx->OldIntegrationTime = configuredIntegrationTime;
+    pIMX675Ctx->AecCurIntegrationTimeLEF = configuredIntegrationTime;
+
+    TRACE(IMX675_DEBUG, "%s: Updated LEF Integration Time = (fsc[%u] - shr0[%u]) * one_line_exp_time[%f] = %f\n",
+          __func__, fsc, shr0, pIMX675Ctx->one_line_exp_time, configuredIntegrationTime);
+    return RET_SUCCESS;
+}
+
+static RESULT IMX675_UpdateCurrLEFIntegrationTimeFromVmax(IMX675_Context_t* pIMX675Ctx, uint32_t vmax, uint32_t shr0) {
+    if (pIMX675Ctx == NULL) {
+        return RET_NULL_POINTER;
+    }
+
+    size_t dol = IMX675_GetNumExposures(pIMX675Ctx);
+    uint32_t fsc = vmax * dol;
+    TRACE(IMX675_DEBUG, "%s: fsc = vmax[%u] * dol[%zu] = %u\n", __func__, vmax, dol, fsc);
+    return IMX675_UpdateCurrLEFIntegrationTimeFromFsc(pIMX675Ctx, fsc, shr0);
+}
+
+static inline uint32_t IMX675_getNewVmaxAntiFlicker(IMX675_Context_t *pIMX675Ctx, uint32_t requestedVmax) {
+    uint32_t closestVmax = requestedVmax;
+    int peaks = 0;
+    int difference = INT_MAX;
+    int minDifference = INT_MAX;
+    if (!pIMX675Ctx) {
+        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        return (-1);
+    }
+    peaks = IMX675_getFlickerPeaksPerSec(pIMX675Ctx->flicker_fps_mode);
+    if (peaks == 0) {
+        // No anti-flicker mode, return requested or original Vmax
+        if (pIMX675Ctx->unlimit_fps && pIMX675Ctx->unlimit_fps_vmax_changed)
+            return requestedVmax;
+        else
+            return pIMX675Ctx->original_vmax; 
+    }
+
+    for (int i = 1; i < peaks; ++i) {
+        uint32_t candidateVmax = i / (peaks * pIMX675Ctx->one_line_exp_time);
+        if (candidateVmax < pIMX675Ctx->SensorMode.size.height || candidateVmax < pIMX675Ctx->original_vmax)
+            continue;
+
+        difference = abs((int)requestedVmax - (int)candidateVmax);
+        if (difference < minDifference) {
+            minDifference = difference;
+            closestVmax = candidateVmax;
+        }
+
+        // Since i / peaks is monotonically increasing, we can break early if the difference starts to increase
+        if (candidateVmax > requestedVmax && difference > minDifference) {
+            break;
+        }
+    }
+    return closestVmax;
+}
+
 static RESULT IMX675_IsiUnlimitFpsIss(IsiSensorHandle_t handle,
                                       float maxIntegrationTime) {
     RESULT result = RET_SUCCESS;
@@ -888,6 +992,7 @@ static RESULT IMX675_IsiUnlimitFpsIss(IsiSensorHandle_t handle,
 static RESULT IMX675_IsiLimitFpsIss(IsiSensorHandle_t handle) {
     RESULT result = RET_SUCCESS;
     uint32_t current_vmax = 0;
+    uint32_t new_vmax = 0;
     TRACE(IMX675_INFO, "%s (enter)\n", __func__);
     IMX675_Context_t* pIMX675Ctx = (IMX675_Context_t*)handle;
     if (!pIMX675Ctx) {
@@ -898,17 +1003,33 @@ static RESULT IMX675_IsiLimitFpsIss(IsiSensorHandle_t handle) {
         return result;
 
     IMX675_ReadVmax(handle, &current_vmax);
+    if (current_vmax == 0) {
+        TRACE(IMX675_INFO, "%s - exit because current_vmax is 0\n", __func__);
+        return result;
+    }
 
     pIMX675Ctx->unlimit_fps = 0;
+    pIMX675Ctx->unlimit_fps_vmax_changed = 0;
     if (pIMX675Ctx->original_vmax == 0) {
         pIMX675Ctx->original_vmax = current_vmax;
     }
-    if (current_vmax != pIMX675Ctx->original_vmax) {
-        IMX675_WriteVmax(handle, pIMX675Ctx->original_vmax);
+
+    new_vmax = pIMX675Ctx->original_vmax;
+    if (pIMX675Ctx->flicker_fps_mode != ISI_AE_ANTIBANDING_MODE_OFF) {
+        new_vmax = IMX675_getNewVmaxAntiFlicker(pIMX675Ctx, pIMX675Ctx->original_vmax);
+        TRACE(IMX675_DEBUG, "%s -Anti Flicker Fps mode %d, set new vmax %u\n", __func__, pIMX675Ctx->flicker_fps_mode, new_vmax);
+    }
+    if (current_vmax != new_vmax) {
+        result |= IMX675_LockRegHold(handle);
+        result |= IMX675_WriteVmax(handle, new_vmax);
+        result |= IMX675_UnlockRegHold(handle);
+
+        int shr = MAX((int)current_vmax - (int)(pIMX675Ctx->AecCurIntegrationTimeLEF / pIMX675Ctx->one_line_exp_time), IMX675_MIN_SHR);
+        result |= IMX675_UpdateCurrLEFIntegrationTimeFromVmax(pIMX675Ctx, new_vmax, shr);
     }
 
     pIMX675Ctx->MaxIntegrationLine =
-        MAX(pIMX675Ctx->original_vmax - IMX675_MIN_SHR, 1);
+        MAX(new_vmax - IMX675_MIN_SHR, 1);
     TRACE(IMX675_INFO, "%s: set MaxIntegrationLine to %u\n", __func__,
           pIMX675Ctx->MaxIntegrationLine);
     pIMX675Ctx->AecMaxIntegrationTime =
@@ -987,6 +1108,32 @@ static RESULT IMX675_IsiGetIntegrationTimeLimitsIss(
     return (result);
 }
 
+static RESULT IMX675_IsiGetAbsoluteIntegrationTimeLimitsIss(
+    IsiSensorHandle_t handle, float* pMinIntegrationTime,
+    float* pMaxIntegrationTime) {
+    IMX675_Context_t* pIMX675Ctx = (IMX675_Context_t*)handle;
+    RESULT result = RET_SUCCESS;
+
+    TRACE(IMX675_INFO, "%s: (enter)\n", __func__);
+    if (pIMX675Ctx == NULL) {
+        TRACE(IMX675_ERROR,
+              "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        return (RET_WRONG_HANDLE);
+    }
+
+    if ((pMinIntegrationTime == NULL) || (pMaxIntegrationTime == NULL)) {
+        TRACE(IMX675_ERROR, "%s: NULL pointer received!!\n", __func__);
+        return (RET_NULL_POINTER);
+    }
+
+    *pMinIntegrationTime = IMX675_EXP_MIN_LINES * pIMX675Ctx->one_line_exp_time;
+    *pMaxIntegrationTime = (IMX675_VMAX_MAX - IMX675_MIN_SHR) * pIMX675Ctx->one_line_exp_time;
+
+    TRACE(IMX675_INFO, "%s: (exit) %f, %f\n", 
+    __func__, *pMinIntegrationTime, *pMaxIntegrationTime);
+    return (result);
+}
+
 /* Gain get functions*/
 
 RESULT IMX675_IsiGetGainIss(IsiSensorHandle_t handle, float *pSetGain)
@@ -1005,10 +1152,8 @@ RESULT IMX675_IsiGetGainIss(IsiSensorHandle_t handle, float *pSetGain)
 		return (RET_NULL_POINTER);
 	}
 
-#ifndef BRINGUP_CONFIG
 	if (pIMX675Ctx->enableHdr)
 		return IMX675_IsiGetSEF1GainIss(handle, pSetGain);
-#endif // BRINGUP_CONFIG
 
 	return IMX675_IsiGetLEFGainIss(handle, pSetGain);
 }
@@ -1035,7 +1180,6 @@ RESULT IMX675_IsiGetLEFGainIss(IsiSensorHandle_t handle, float *pSetGain)
 	return (result);
 }
 
-#ifndef BRINGUP_CONFIG
 RESULT IMX675_IsiGetSEF1GainIss(IsiSensorHandle_t handle, float *pSetGain)
 {
 	IMX675_Context_t *pIMX675Ctx = (IMX675_Context_t *)handle;
@@ -1061,7 +1205,7 @@ RESULT IMX675_IsiGetSEF1GainIss(IsiSensorHandle_t handle, float *pSetGain)
 
 	return (result);
 }
-#endif //BRINGUP_CONFIG
+
 RESULT IMX675_IsiGetSEF2GainIss(IsiSensorHandle_t handle, float *pSetGain)
 {
 	IMX675_Context_t *pIMX675Ctx = (IMX675_Context_t *)handle;
@@ -1139,15 +1283,15 @@ RESULT IMX675_IsiSetGainIss(IsiSensorHandle_t handle, float NewGain,
 		return RET_NULL_POINTER;
 	}
 
-#ifndef BRINGUP_CONFIG
 	if (pIMX675Ctx->enableHdr) {
 		result = IMX675_IsiSetSEF1GainIss(handle, 0, NewGain, pSetGain,
 						hdr_ratio);
 
-		result |= IMX675_IsiSetSEF2GainIss(handle, 0, NewGain, pSetGain,
-						hdr_ratio);
+        if (pIMX675Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
+            result |= IMX675_IsiSetSEF2GainIss(
+                handle, 0, NewGain, pSetGain, hdr_ratio);
+        }
 	}
-#endif //BRINGUP_CONFIG
 
 	result |= IMX675_IsiSetLEFGainIss(handle, NewGain, pSetGain, hdr_ratio);
 	return result;
@@ -1158,7 +1302,24 @@ static inline uint32_t _linear2sensorGain(float gain)
     uint32_t db = 0;
     float log_gain = log10(gain);
     log_gain = (log_gain * 10 * 20) / 3;
-    db = (uint32_t)(log_gain);
+    db = roundf(log_gain);
+    return db;
+}
+
+static inline uint32_t _linear2sensorGainCeil(float gain)
+{
+    const float epsilon = 0.1;
+
+    uint32_t db = 0;
+    float log_gain = log10(gain);
+    log_gain = (log_gain * 10 * 20) / 3;
+
+    // We can assume that due to rounding/quantization, given gain is not exactly accurate.
+    // And if it's lower than it's original value, this function might eventually round down the value
+    // This will break the hdr ratios for this extreme case.
+    // To prevent this, we add epsilon to our calculated gain.
+    // This way, we are only allowed to make mistakes that increase gain, and not decrease it.
+    db = ceil(log_gain + epsilon);
     return db;
 }
 
@@ -1198,7 +1359,6 @@ RESULT IMX675_IsiSetLEFGainIss(IsiSensorHandle_t handle, float NewGain,
 	return (result);
 }
 
-#ifndef BRINGUP_CONFIG
 RESULT IMX675_IsiSetSEF1GainIss(IsiSensorHandle_t handle,
 				float NewIntegrationTime, float NewGain,
 				float *pSetGain, float *hdr_ratio)
@@ -1260,7 +1420,6 @@ RESULT IMX675_IsiSetSEF2GainIss(IsiSensorHandle_t handle,
 	TRACE(IMX675_DEBUG, "%s: g=%f\n", __func__, *pSetGain);
 	return (result);
 }
-#endif //BRINGUP_CONFIG
 
 /* Integration Time get functions*/
 
@@ -1280,10 +1439,8 @@ RESULT IMX675_IsiGetIntegrationTimeIss(IsiSensorHandle_t handle,
 	
 	TRACE(IMX675_DEBUG, "%s - enter\n", __func__);
 	
-#ifndef BRINGUP_CONFIG
 	if (pIMX675Ctx->enableHdr)
 		return IMX675_IsiGetSEF1IntegrationTimeIss(handle, pSetIntegrationTime);
-#endif //BRINGUP_CONFIG
 	
 	return IMX675_IsiGetLEFIntegrationTimeIss(handle, pSetIntegrationTime);
 }
@@ -1308,7 +1465,6 @@ RESULT IMX675_IsiGetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
 	return (result);
 }
 
-#ifndef BRINGUP_CONFIG
 RESULT IMX675_IsiGetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 					   float *pSetIntegrationTime)
 {
@@ -1326,7 +1482,6 @@ RESULT IMX675_IsiGetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 	TRACE(IMX675_DEBUG, "%s - returning %f\n", __func__, pIMX675Ctx->AecCurIntegrationTimeSEF1);
 	return (result);
 }
-#endif //BRINGUP_CONFIG
 
 RESULT IMX675_IsiGetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 					   float *pSetIntegrationTime)
@@ -1382,13 +1537,11 @@ RESULT IMX675_IsiSetIntegrationTimeIss(IsiSensorHandle_t handle,
 		return (RET_WRONG_HANDLE);
 	}
 
-#ifndef BRINGUP_CONFIG
 	if (pIMX675Ctx->enableHdr) {
 		return IMX675_IsiSetSEF1IntegrationTimeIss(
 			handle, NewIntegrationTime, pSetIntegrationTime,
 			pNumberOfFramesToSkip, hdr_ratio);
 	}
-#endif //BRINGUP_CONFIG
 
 	return IMX675_IsiSetLEFIntegrationTimeIss(
 		handle, NewIntegrationTime, pSetIntegrationTime,
@@ -1410,10 +1563,8 @@ RESULT IMX675_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
     uint32_t new_vmax = 0;
     uint32_t vmax_updated = 0;
     uint32_t current_vmax = 0;
-#ifndef BRINGUP_CONFIG
     uint32_t rhs1;
     uint32_t rhs2;
-#endif //BRINGUP_CONFIG
 
     if (!pIMX675Ctx) {
         printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
@@ -1429,14 +1580,13 @@ RESULT IMX675_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
         TRACE(IMX675_ERROR, "%s: sensor not streaming\n", __func__);
         return RET_FAILURE;
     }
-    exp = NewIntegrationTime / pIMX675Ctx->one_line_exp_time;
+    exp = roundf(NewIntegrationTime / pIMX675Ctx->one_line_exp_time);
 
     TRACE(IMX675_DEBUG, "%s: set AEC_PK_EXPO=0x%05x\n", __func__, exp);
 
     if (fabs(NewIntegrationTime - pIMX675Ctx->AecCurIntegrationTimeLEF) > FLT_EPSILON) {
 
         if (pIMX675Ctx->enableHdr){
-#ifndef BRINGUP_CONFIG
             if (pIMX675Ctx->cur_rhs1 == 0 || pIMX675Ctx->cur_rhs2 == 0) {
                 TRACE(IMX675_ERROR, "%s: Invalid parameter (RHS1 or RHS2 not set)\n", __func__);
                 return (RET_WRONG_CONFIG);
@@ -1445,19 +1595,24 @@ RESULT IMX675_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
             rhs1 = pIMX675Ctx->cur_rhs1;
             rhs2 = pIMX675Ctx->cur_rhs2;
             if (pIMX675Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
-                new_vmax = IMX675_VMAX_2DOL_HDR;
+                if(IMX675_ReadVmax(pIMX675Ctx, &new_vmax) != RET_SUCCESS){
+                    TRACE(IMX675_ERROR, "%s: unable to read vmax\n", __func__);
+                    new_vmax = IMX675_2DOL_FSC;
+                }else{
+                    new_vmax *= IMX675_2DOL_NUM_EXP;
+                }
+
                 exp = new_vmax - exp;
                 exp = exp > rhs1 + IMX675_2DOL_SHR0_RHS1_GAP ? exp : rhs1 + IMX675_2DOL_SHR0_RHS1_GAP;
                 exp = exp < new_vmax - IMX675_2DOL_SHR0_FSC_GAP? exp : new_vmax - IMX675_2DOL_SHR0_FSC_GAP;
                 shr = exp;
             } else {
-                new_vmax = IMX675_VMAX_3DOL_HDR;
+                new_vmax = IMX675_3DOL_FSC;
                 exp = new_vmax - exp;
-                exp = exp > rhs2 + IMX675_SHR0_RHS2_GAP ? exp : rhs2 + IMX675_SHR0_RHS2_GAP;
-                exp = exp < new_vmax - IMX675_SHR0_FSC_GAP? exp : new_vmax - IMX675_SHR0_FSC_GAP;
+                exp = exp > rhs2 + IMX675_3DOL_SHR0_RHS2_GAP ? exp : rhs2 + IMX675_3DOL_SHR0_RHS2_GAP;
+                exp = exp < new_vmax - IMX675_3DOL_SHR0_FSC_GAP? exp : new_vmax - IMX675_3DOL_SHR0_FSC_GAP;
                 shr = exp;
             }
-#endif //BRINGUP_CONFIG
 		} else {
             if (exp > pIMX675Ctx->MaxIntegrationLine || exp == 0) {
                 TRACE(IMX675_ERROR, "%s: Integration time %f (exp %u) out of range (%u)\n", __func__,
@@ -1484,17 +1639,26 @@ RESULT IMX675_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
 
             shr = current_vmax - exp;
 
-            if (shr < IMX675_MIN_SHR) {
-                new_vmax = MIN(exp + IMX675_MIN_SHR,
-                            pIMX675Ctx->MaxIntegrationLine + IMX675_MIN_SHR);
-                shr = IMX675_MIN_SHR;
+            if (shr < IMX675_MIN_SHR || current_vmax > pIMX675Ctx->original_vmax) {
+                if (shr < IMX675_MIN_SHR) {
+                    // user asked for too big integration-line: more than (current_vmax - minimal_shutter)
+                    // increase vmax and set new shutter to minimal value
+                    new_vmax = MIN(exp + IMX675_MIN_SHR, pIMX675Ctx->MaxIntegrationLine + IMX675_MIN_SHR);
+                } else {
+                    // make sure that when we unlimit fps, stay below original fps.
+                    // also, make sure we are not using high vmax + high shr more than needed (will slow fps for no reason)
+                    new_vmax = MAX(current_vmax - shr + IMX675_MIN_SHR, pIMX675Ctx->original_vmax);
+                }
+                pIMX675Ctx->unlimit_fps_vmax_changed = new_vmax > pIMX675Ctx->original_vmax && pIMX675Ctx->unlimit_fps;
+        
+                if (pIMX675Ctx->flicker_fps_mode != ISI_AE_ANTIBANDING_MODE_OFF) {
+                    new_vmax = IMX675_getNewVmaxAntiFlicker(pIMX675Ctx, new_vmax);
+                    TRACE(IMX675_DEBUG, "%s -Anti Flicker Fps mode %d, set new vmax %u\n", __func__, pIMX675Ctx->flicker_fps_mode, new_vmax);
+                }
+                
+                shr = MAX(IMX675_MIN_SHR, (int)new_vmax - (int)exp);
                 vmax_updated = 1;
-            } else if (shr > IMX675_MIN_SHR &&
-                    current_vmax > pIMX675Ctx->original_vmax) {
-                new_vmax = MAX(current_vmax - shr + IMX675_MIN_SHR,
-                            pIMX675Ctx->original_vmax);
-                shr = new_vmax - exp;
-                vmax_updated = 1;
+
             } else {
                 new_vmax = current_vmax;
             }
@@ -1509,10 +1673,8 @@ RESULT IMX675_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
         result |= IMX675_WriteShr0(handle, shr);
         result |= IMX675_UnlockRegHold(handle);
 
-        float configuredIntegrationTime =
-            (new_vmax - shr) * pIMX675Ctx->one_line_exp_time;
-        pIMX675Ctx->OldIntegrationTime = configuredIntegrationTime;
-        pIMX675Ctx->AecCurIntegrationTimeLEF = configuredIntegrationTime;
+        // In this context, the "new_vmax" is actually the FSC (multiplied by DOL), not the VMAX.
+        result |= IMX675_UpdateCurrLEFIntegrationTimeFromFsc(pIMX675Ctx, new_vmax, shr);
 
         *pNumberOfFramesToSkip = 1U;
     } else {
@@ -1524,7 +1686,6 @@ RESULT IMX675_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
     return (result);
 }
 
-#ifndef BRINGUP_CONFIG
 RESULT IMX675_IsiSetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 					   float NewIntegrationTime,
 					   float *pSetIntegrationTimeSEF1,
@@ -1556,13 +1717,19 @@ RESULT IMX675_IsiSetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 	}
 	TRACE(IMX675_DEBUG, "%s: NewIntegrationTime = %f\n", __func__, NewIntegrationTime);
 
-	exp = (NewIntegrationTime / pIMX675Ctx->one_line_exp_time);
+	exp = roundf(NewIntegrationTime / pIMX675Ctx->one_line_exp_time);
 	TRACE(IMX675_DEBUG, "%s - calculated IT in rows = 0x%x\n", __func__, exp);
 
 	if (fabs(NewIntegrationTime - pIMX675Ctx->AecCurIntegrationTimeSEF1) > FLT_EPSILON) {
-		exp = rhs1 - exp;
-		exp = exp > IMX675_3DOL_SHR1_RHS1_GAP ? exp : IMX675_3DOL_SHR1_RHS1_GAP;
-		exp = exp < rhs1 - IMX675_SHR1_RHS1_GAP ? exp : rhs1 - IMX675_SHR1_RHS1_GAP;
+        if (pIMX675Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
+			exp = rhs1 - exp;
+			exp = exp > IMX675_2DOL_SHR1_RHS1_GAP ? exp : IMX675_2DOL_SHR1_RHS1_GAP;
+			exp = exp < rhs1 - IMX675_2DOL_SHR1_RHS1_GAP ? exp : rhs1 - IMX675_2DOL_SHR1_RHS1_GAP;
+		} else {
+			exp = rhs1 - exp;
+			exp = exp > IMX675_3DOL_SHR1_RHS1_GAP ? exp : IMX675_3DOL_SHR1_RHS1_GAP;
+			exp = exp < rhs1 - IMX675_3DOL_SHR1_RHS1_GAP ? exp : rhs1 - IMX675_3DOL_SHR1_RHS1_GAP;
+		}
 		TRACE(IMX675_DEBUG, "%s - writing 0x%x to SHR1\n", __func__, exp);
 
 		result |= IMX675_LockRegHold(handle);
@@ -1614,13 +1781,13 @@ RESULT IMX675_IsiSetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 	}
 	TRACE(IMX675_DEBUG, "%s: NewIntegrationTime = %f\n", __func__, NewIntegrationTime);
 
-	exp = (NewIntegrationTime / pIMX675Ctx->one_line_exp_time);
+	exp = roundf(NewIntegrationTime / pIMX675Ctx->one_line_exp_time);
 	TRACE(IMX675_DEBUG, "%s - calculated IT in rows = 0x%x\n", __func__, exp);
 
 	if (fabs(NewIntegrationTime - pIMX675Ctx->AecCurIntegrationTimeSEF2) > FLT_EPSILON) {
 		exp = rhs2 - exp;
-		exp = exp > rhs1 + IMX675_SHR2_RHS1_GAP ? exp : rhs1 + IMX675_SHR2_RHS1_GAP;
-		exp = exp < rhs2 - IMX675_SHR2_RHS2_GAP ? exp : rhs2 - IMX675_SHR2_RHS2_GAP;
+		exp = exp > rhs1 + IMX675_3DOL_SHR2_RHS1_GAP ? exp : rhs1 + IMX675_3DOL_SHR2_RHS1_GAP;
+		exp = exp < rhs2 - IMX675_3DOL_SHR2_RHS2_GAP ? exp : rhs2 - IMX675_3DOL_SHR2_RHS2_GAP;
 		TRACE(IMX675_DEBUG, "%s - writing 0x%x to SHR2\n", __func__, exp);
 
 		result |= IMX675_LockRegHold(handle);
@@ -1657,8 +1824,10 @@ RESULT IMX675_Calculate3DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 	bool calculate_gain = false;
 	uint32_t rhs1;
 	uint32_t rhs2;
+	bool optimize_long_gain = false;
+	bool optimize_short_gain = false;
 
-    if (pIMX675Ctx == NULL || o_long_it == NULL || o_short_it == NULL ||
+	if (pIMX675Ctx == NULL || o_long_it == NULL || o_short_it == NULL ||
         o_very_short_it == NULL || o_long_gain == NULL || o_short_gain == NULL ||
         o_very_short_gain == NULL || hdr_ratio == NULL) {
         printf("%s: Invalid parameter (NULL pointer detected)\n", __func__);
@@ -1696,6 +1865,11 @@ RESULT IMX675_Calculate3DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
         calculate_gain = true;
     }
 
+	if(NewIntegrationTime < IMX675_3DOL_SHR2_RHS2_GAP * pIMX675Ctx->one_line_exp_time * hdr_ratio[1]){
+		pIMX675Ctx->MinIntegrationLine =  IMX675_3DOL_SHR2_RHS2_GAP * hdr_ratio[1];
+		pIMX675Ctx->AecMinIntegrationTime = pIMX675Ctx->MinIntegrationLine * pIMX675Ctx->one_line_exp_time;
+    }
+
     // assume gain is 1 and see if ratio can be achieved with integration time
     long_it 		= NewIntegrationTime * hdr_ratio[0];
     short_it 		= NewIntegrationTime;
@@ -1709,24 +1883,25 @@ RESULT IMX675_Calculate3DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 
     TRACE(IMX675_DEBUG, "%s: requested IT in lines long: %f, short: %f, very_short: %f\n", 
     __func__, long_exp_val, short_exp_val, very_short_exp_val);
-    long_exp_val 		= IMX675_VMAX_3DOL_HDR - long_exp_val;
+    long_exp_val 		= IMX675_3DOL_FSC - long_exp_val;
     short_exp_val 		= rhs1 - short_exp_val;
     very_short_exp_val 	= rhs2 - very_short_exp_val;
 
     TRACE(IMX675_DEBUG, "%s: requested IT in shr long: %f, short: %f, very_short: %f\n", 
     __func__, long_exp_val, short_exp_val, very_short_exp_val);
-    if(long_exp_val < rhs2 + IMX675_SHR0_RHS2_GAP) {
-        long_exp_val = rhs2 + IMX675_SHR0_RHS2_GAP;
-        long_it = (IMX675_VMAX_3DOL_HDR - long_exp_val) * pIMX675Ctx->one_line_exp_time;
+    if(long_exp_val < rhs2 + IMX675_3DOL_SHR0_RHS2_GAP) {
+        long_exp_val = rhs2 + IMX675_3DOL_SHR0_RHS2_GAP;
+        long_it = (IMX675_3DOL_FSC - long_exp_val) * pIMX675Ctx->one_line_exp_time;
         calculate_gain = true;
+        optimize_long_gain = true;
         TRACE(IMX675_DEBUG, "%s: long_exp_val is too long, set to %u, new long_it = %f\n",
-        __func__, rhs2 + IMX675_SHR0_RHS2_GAP, long_it);
-    } else if(long_exp_val > IMX675_VMAX_3DOL_HDR - IMX675_SHR0_FSC_GAP) {
-        long_exp_val = IMX675_VMAX_3DOL_HDR - IMX675_SHR0_FSC_GAP;
-        long_it = (IMX675_VMAX_3DOL_HDR - long_exp_val) * pIMX675Ctx->one_line_exp_time;
+        __func__, rhs2 + IMX675_3DOL_SHR0_RHS2_GAP, long_it);
+    } else if(long_exp_val > IMX675_3DOL_FSC - IMX675_3DOL_SHR0_FSC_GAP) {
+        long_exp_val = IMX675_3DOL_FSC - IMX675_3DOL_SHR0_FSC_GAP;
+        long_it = (IMX675_3DOL_FSC - long_exp_val) * pIMX675Ctx->one_line_exp_time;
         calculate_gain = true;
         TRACE(IMX675_DEBUG, "%s: long_exp_val is too short, set to %u, new long_it = %f\n",
-        __func__, IMX675_VMAX_3DOL_HDR - IMX675_SHR0_FSC_GAP, long_it);
+        __func__, IMX675_3DOL_FSC - IMX675_3DOL_SHR0_FSC_GAP, long_it);
     }
     if(short_exp_val < IMX675_3DOL_SHR1_RHS1_GAP) {
         short_exp_val = IMX675_3DOL_SHR1_RHS1_GAP;
@@ -1734,32 +1909,44 @@ RESULT IMX675_Calculate3DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
         calculate_gain = true;
         TRACE(IMX675_DEBUG, "%s: short_exp_val is too long, set to %u, new short_it = %f\n",
         __func__, IMX675_3DOL_SHR1_RHS1_GAP, short_it);
-    } else if(short_exp_val > rhs1 - IMX675_SHR1_RHS1_GAP) {
-        short_exp_val = rhs1 - IMX675_SHR1_RHS1_GAP;
+    } else if(short_exp_val > rhs1 - IMX675_3DOL_SHR1_RHS1_GAP) {
+        short_exp_val = rhs1 - IMX675_3DOL_SHR1_RHS1_GAP;
         short_it = (rhs1 - short_exp_val) * pIMX675Ctx->one_line_exp_time;
         calculate_gain = true;
         TRACE(IMX675_DEBUG, "%s: short_exp_val is too short, set to %u, new short_it = %f\n",
-        __func__, rhs1 - IMX675_SHR1_RHS1_GAP, short_it);
+        __func__, rhs1 - IMX675_3DOL_SHR1_RHS1_GAP, short_it);
     }
-    if(very_short_exp_val < rhs1 + IMX675_SHR2_RHS1_GAP) {
-        very_short_exp_val = rhs1 + IMX675_SHR2_RHS1_GAP;
+    if(very_short_exp_val < rhs1 + IMX675_3DOL_SHR2_RHS1_GAP) {
+        very_short_exp_val = rhs1 + IMX675_3DOL_SHR2_RHS1_GAP;
         very_short_it = (rhs2 - very_short_exp_val) * pIMX675Ctx->one_line_exp_time;
         calculate_gain = true;
+        optimize_short_gain = true;
         TRACE(IMX675_DEBUG, "%s: very_short_exp_val is too long, set to %u, new very_short_it = %f\n",
-        __func__, rhs2 + IMX675_SHR2_RHS1_GAP, very_short_it);
-    } else if(very_short_exp_val > rhs2 - IMX675_SHR2_RHS2_GAP) {
-        very_short_exp_val = rhs2 - IMX675_SHR2_RHS2_GAP;
+        __func__, rhs2 + IMX675_3DOL_SHR2_RHS1_GAP, very_short_it);
+    } else if(very_short_exp_val > rhs2 - IMX675_3DOL_SHR2_RHS2_GAP) {
+        very_short_exp_val = rhs2 - IMX675_3DOL_SHR2_RHS2_GAP;
         very_short_it = (rhs2 - very_short_exp_val) * pIMX675Ctx->one_line_exp_time;
         calculate_gain = true;
         TRACE(IMX675_DEBUG, "%s: very_short_exp_val is too short, set to %u, new very_short_it = %f\n",
-        __func__, rhs2 - IMX675_SHR2_RHS2_GAP, very_short_it);
+        __func__, rhs2 - IMX675_3DOL_SHR2_RHS2_GAP, very_short_it);
     }
 
     // need to use gain to achive ratio / requested gain update
     if(calculate_gain || NewGain != pIMX675Ctx->AecCurGainSEF1) {
-        long_gain = (short_it * NewGain * hdr_ratio[0]) / long_it;
+        float real_short_gain = _sensorGain2linear(_linear2sensorGain(NewGain));
+        long_gain = (short_it * real_short_gain * hdr_ratio[0]) / long_it;
+        if(optimize_long_gain){
+             long_gain = _sensorGain2linear(_linear2sensorGainCeil(long_gain));
+             long_it = (short_it * real_short_gain * hdr_ratio[0]) / long_gain;
+        }
+
         short_gain = NewGain;
         very_short_gain = (short_it * NewGain) / (very_short_it * hdr_ratio[1]);
+        if(optimize_short_gain){
+             very_short_gain = _sensorGain2linear(_linear2sensorGainCeil(very_short_gain));
+             very_short_it = (short_it * real_short_gain) / (very_short_gain * hdr_ratio[1]);
+        }
+
         TRACE(IMX675_DEBUG, "%s: calculated gain: long: %f, short: %f, very_short: %f\n",
         __func__, long_gain, short_gain, very_short_gain);
     }
@@ -1789,6 +1976,8 @@ RESULT IMX675_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 	float short_gain = 1;
 	bool calculate_gain = false;
 	uint32_t rhs1;
+	uint32_t vmax = 0; 
+	bool optimize_gain = false;
 
     if (pIMX675Ctx == NULL || o_long_it == NULL ||
         o_long_gain == NULL || o_short_gain == NULL ||
@@ -1827,6 +2016,12 @@ RESULT IMX675_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
         calculate_gain = true;
     }
 
+    if(IMX675_ReadVmax(pIMX675Ctx, &vmax) != RET_SUCCESS){
+	    TRACE(IMX675_ERROR, "%s: unable to read vmax\n", __func__);
+    }
+
+    vmax *= IMX675_2DOL_NUM_EXP;
+
     // assume gain is 1 and see if ratio can be achieved with integration time
     long_it 		= NewIntegrationTime * hdr_ratio[0];
     short_it 		= NewIntegrationTime;
@@ -1838,23 +2033,24 @@ RESULT IMX675_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 
     TRACE(IMX675_DEBUG, "%s: requested IT in lines long: %f, short: %f\n", 
     __func__, long_exp_val, short_exp_val);
-    long_exp_val 		= IMX675_VMAX_2DOL_HDR - long_exp_val;
+    long_exp_val 		= IMX675_2DOL_FSC - long_exp_val;
     short_exp_val 		= rhs1 - short_exp_val;
 
     TRACE(IMX675_DEBUG, "%s: requested IT in shr long: %f, short: %f\n",
     __func__, long_exp_val, short_exp_val);
     if(long_exp_val < rhs1 + IMX675_2DOL_SHR0_RHS1_GAP) {
         long_exp_val = rhs1 + IMX675_2DOL_SHR0_RHS1_GAP;
-        long_it = (IMX675_VMAX_2DOL_HDR - long_exp_val) * pIMX675Ctx->one_line_exp_time;
+        long_it = (IMX675_2DOL_FSC - long_exp_val) * pIMX675Ctx->one_line_exp_time;
+        optimize_gain = true;
         calculate_gain = true;
         TRACE(IMX675_DEBUG, "%s: long_exp_val is too long, set to %u, new long_it = %f\n",
         __func__, rhs1 + IMX675_2DOL_SHR0_RHS1_GAP, long_it);
-    } else if(long_exp_val > IMX675_VMAX_2DOL_HDR - IMX675_2DOL_SHR0_FSC_GAP) {
-        long_exp_val = IMX675_VMAX_2DOL_HDR - IMX675_2DOL_SHR0_FSC_GAP;
-        long_it = (IMX675_VMAX_2DOL_HDR - long_exp_val) * pIMX675Ctx->one_line_exp_time;
+    } else if(long_exp_val > IMX675_2DOL_FSC - IMX675_2DOL_SHR0_FSC_GAP) {
+        long_exp_val = IMX675_2DOL_FSC - IMX675_2DOL_SHR0_FSC_GAP;
+        long_it = (IMX675_2DOL_FSC - long_exp_val) * pIMX675Ctx->one_line_exp_time;
         calculate_gain = true;
         TRACE(IMX675_DEBUG, "%s: long_exp_val is too short, set to %u, new long_it = %f\n",
-        __func__, IMX675_VMAX_2DOL_HDR - IMX675_2DOL_SHR0_FSC_GAP, long_it);
+        __func__, IMX675_2DOL_FSC - IMX675_2DOL_SHR0_FSC_GAP, long_it);
     }
     if(short_exp_val < IMX675_2DOL_SHR1_MIN_GAP) {
         short_exp_val = IMX675_2DOL_SHR1_MIN_GAP;
@@ -1872,7 +2068,13 @@ RESULT IMX675_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 
     // need to use gain to achieve ratio / requested gain update
     if(calculate_gain || NewGain != pIMX675Ctx->AecCurGainSEF1) {
-        long_gain = (short_it * NewGain * hdr_ratio[0]) / long_it;
+        float real_short_gain = _sensorGain2linear(_linear2sensorGain(NewGain));
+        long_gain = (short_it * real_short_gain * hdr_ratio[0]) / long_it;
+        if(optimize_gain){
+             long_gain = _sensorGain2linear(_linear2sensorGainCeil(long_gain));
+             long_it = (short_it * real_short_gain * hdr_ratio[0]) / long_gain;
+        }
+
         short_gain = NewGain;
         TRACE(IMX675_DEBUG, "%s: calculated gain: long: %f, short: %f\n",
         __func__, long_gain, short_gain);
@@ -1885,7 +2087,6 @@ RESULT IMX675_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 
     return RET_SUCCESS;
 }
-#endif //BRINGUP_CONFIG
 
 RESULT IMX675_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
                                     float NewIntegrationTime,
@@ -1895,7 +2096,6 @@ RESULT IMX675_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
     IMX675_Context_t* pIMX675Ctx = (IMX675_Context_t*)handle;
 
     RESULT result = RET_SUCCESS;
-#ifndef BRINGUP_CONFIG
     float long_it = 0.0;
 	float short_it = 0.0;
 	float very_short_it = 0.0;
@@ -1903,7 +2103,6 @@ RESULT IMX675_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
 	float short_gain = 1;
 	float very_short_gain = 1;
     uint32_t hmax;
-#endif //BRINGUP_CONFIG
 
     TRACE(IMX675_INFO, "%s: enter with NewIntegrationTime: %f, NewGain: %f\n",
         __func__, NewIntegrationTime, NewGain);
@@ -1920,7 +2119,6 @@ RESULT IMX675_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
     }
 
     if (pIMX675Ctx->enableHdr) {
-#ifndef BRINGUP_CONFIG
         result = IMX675_ReadRHS1(handle, &pIMX675Ctx->cur_rhs1);
         result |= IMX675_ReadRHS2(handle, &pIMX675Ctx->cur_rhs2);
         result |= IMX675_ReadHmax(handle, &hmax);
@@ -1929,7 +2127,7 @@ RESULT IMX675_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
             return result;
         }
 
-        pIMX675Ctx->SensorMode.ae_info.one_line_exp_time_ns = (uint32_t)(((float)hmax / IMX675_PIXEL_CLK_RATE) * MICRO_2_NANO);
+        pIMX675Ctx->SensorMode.ae_info.one_line_exp_time_ns = HMAX_TO_ONE_LINE_EXP_NS(hmax);
         pIMX675Ctx->one_line_exp_time =
         (float)(pIMX675Ctx->SensorMode.ae_info.one_line_exp_time_ns) / 1000000000;
 
@@ -1982,7 +2180,6 @@ RESULT IMX675_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
 
         TRACE(IMX675_DEBUG, "%s: actual hdr_ratio[0] = LS Ratio = %f, hdr_ratio[1] = VS Ratio = %f\n",
             __func__, hdr_ratio[0], hdr_ratio[1]);
-#endif //BRINGUP_CONFIG
     } else {
         result |= IMX675_IsiSetLEFIntegrationTimeIss(handle, NewIntegrationTime,
                                                 pSetIntegrationTime,
@@ -2053,10 +2250,70 @@ RESULT IMX675_IsiSetFpsIss(IsiSensorHandle_t handle, uint32_t Fps) {
 
 RESULT IMX675_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode) {
     RESULT result = RET_SUCCESS;
-    // IMX675_Context_t* pIMX675Ctx = (IMX675_Context_t*)handle;
+    IMX675_Context_t* pIMX675Ctx = (IMX675_Context_t*)handle;
+    uint32_t current_vmax = 0;
+    uint32_t requested_vmax = 0;
+    uint32_t shr = 0;
+    int exp = 0;
+
     TRACE(IMX675_DEBUG, "%s: set sensor flickerMode = %d\n", __func__, flickerMode);
 
-    // TODO: implement
+    if (!pIMX675Ctx) {
+        return RET_NULL_POINTER;
+    }
+    if (pIMX675Ctx->flicker_fps_mode == flickerMode) {
+        return RET_SUCCESS;
+    }
+    if (pIMX675Ctx->enableHdr && (pIMX675Ctx->SensorMode.stitching_mode != SENSOR_STITCHING_L_AND_S)) {
+        return RET_SUCCESS;
+    }
+    if (flickerMode > ISI_AE_ANTIBANDING_MODE_AUTO) {
+        TRACE(IMX675_INFO, "%s: Invalid flickerMode (%d), setting ISI_AE_ANTIBANDING_MODE_AUTO instead.\n", __func__, flickerMode);
+        flickerMode = ISI_AE_ANTIBANDING_MODE_AUTO;
+    }
+    pIMX675Ctx->flicker_fps_mode = flickerMode;
+
+    result = IMX675_ReadVmax(handle, &current_vmax);
+    if (result != RET_SUCCESS) {
+        TRACE(IMX675_ERROR, "%s: Unable to read VMAX\n", __func__);
+        return (result);
+    }
+    if (pIMX675Ctx->original_vmax == 0) {
+        pIMX675Ctx->original_vmax = current_vmax;
+    }
+
+    exp = pIMX675Ctx->AecCurIntegrationTimeLEF / pIMX675Ctx->one_line_exp_time;
+    shr = MAX((int)current_vmax - exp, IMX675_MIN_SHR);
+
+    if (current_vmax > pIMX675Ctx->original_vmax) {
+        current_vmax = MAX((int)current_vmax - (int)shr + IMX675_MIN_SHR, IMX675_MIN_SHR);
+        shr = MAX((int)current_vmax - exp, IMX675_MIN_SHR);
+        pIMX675Ctx->unlimit_fps_vmax_changed = current_vmax > pIMX675Ctx->original_vmax && pIMX675Ctx->unlimit_fps;
+    }
+
+    requested_vmax = IMX675_getNewVmaxAntiFlicker(pIMX675Ctx, current_vmax);
+    requested_vmax = MAX( MIN(requested_vmax, IMX675_VMAX_MAX), 1);
+    
+    if (current_vmax != requested_vmax) {
+        shr = MAX( (int)requested_vmax - (int)current_vmax + (int)shr , IMX675_MIN_SHR);
+        TRACE(IMX675_DEBUG, "%s - writing 0x%x to VMAX, writing 0x%x to SHR0\n", __func__, requested_vmax, shr);
+
+        result |= IMX675_LockRegHold(handle);
+        result |= IMX675_WriteVmax(handle, requested_vmax);
+        result |= IMX675_WriteShr0(handle, shr);
+        result |= IMX675_UnlockRegHold(handle);
+        result |= IMX675_UpdateCurrLEFIntegrationTimeFromVmax(pIMX675Ctx, requested_vmax, shr);
+        if (result != RET_SUCCESS) {
+            TRACE(IMX675_ERROR, "%s: Unable to write VMAX or Shr0\n", __func__);
+            return (result);
+        }
+    }
+    
+    pIMX675Ctx->MaxIntegrationLine = MAX( MIN(requested_vmax - IMX675_MIN_SHR, IMX675_VMAX_MAX - IMX675_MIN_SHR), 1);
+    pIMX675Ctx->AecMaxIntegrationTime = pIMX675Ctx->one_line_exp_time * pIMX675Ctx->MaxIntegrationLine;
+
+    TRACE(IMX675_INFO, "%s: set sensor fps = %d\n", __func__,
+          pIMX675Ctx->CurrFps);
 
     TRACE(IMX675_DEBUG, "%s: (exit)\n", __func__);
     return (result);
@@ -2185,9 +2442,6 @@ RESULT IMX675_IsiSetAgainDgainIss(IsiSensorHandle_t handle,
     result = IMX675_IsiWriteRegIss(handle, 0x308c, (Dgain & 0x0000FF));
     result = IMX675_IsiWriteRegIss(handle, 0x308d, (Dgain & 0x00FF00) >> 8);
 
-    // pIMX675Ctx->CurAgain = Gain.again;
-    // pIMX675Ctx->CurDgain = Gain.dgain;
-
     TRACE(IMX675_INFO, "%s: (exit)\n", __func__);
     return (result);
 }
@@ -2236,6 +2490,109 @@ RESULT IMX675_IsiSetIrisIss( IsiSensorHandle_t handle,
     return (result);
 }
 
+RESULT IMX675_IsiGetHCGIss( IsiSensorHandle_t handle,
+                                     bool *phcg ) {
+    RESULT result = RET_SUCCESS;
+
+    TRACE(IMX675_INFO, "%s: (enter)\n", __func__);
+
+    IMX675_Context_t* pIMX675Ctx = (IMX675_Context_t*)handle;
+    if (pIMX675Ctx == NULL) {
+        TRACE(IMX675_ERROR,
+              "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        return (RET_WRONG_HANDLE);
+    }
+
+    *phcg = pIMX675Ctx->hcg;
+
+    TRACE(IMX675_INFO, "%s: (exit)\n", __func__);
+    return (result);
+}
+
+static RESULT IMX675_IsiSetHCGIss(IsiSensorHandle_t handle, bool hcg) {
+    
+    RESULT result = RET_SUCCESS;
+
+    TRACE(IMX675_INFO, "%s: (enter)\n", __func__);
+
+    IMX675_Context_t* pIMX675Ctx = (IMX675_Context_t*)handle;
+
+    if (pIMX675Ctx == NULL) {
+        TRACE(IMX675_ERROR,
+              "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        return (RET_WRONG_HANDLE);
+    }
+
+    result = IMX675_IsiWriteRegIss(handle, 0x3030 , hcg);
+    if (result == RET_SUCCESS) {
+        pIMX675Ctx->hcg = hcg;
+    }
+
+    TRACE(IMX675_INFO, "%s: (exit)\n", __func__);
+    return result;
+}
+
+
+static RESULT IMX675_IsiCalculateHdrBlankingLinesIss(IsiSensorHandle_t handle,
+        uint32_t *pBlankingLines, uint32_t rhs1, uint32_t rhs2) {
+    IMX675_Context_t* pIMX675Ctx = (IMX675_Context_t*)handle;
+
+    /* The following formulas are taken directly from Sony's IMX675 datasheet.
+     * They are located at the "AppNote_DOL_E" document,
+     * at "Operating Mode" -> "Number of Blanking Lines" section. */
+
+    // 2DOL
+    if (pIMX675Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
+        pBlankingLines[0] = (rhs1 - 3) / 2 + 1;
+        pBlankingLines[1] = 0; // Irrelevant in 2DOL
+    // 3DOL
+    } else if (pIMX675Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
+        pBlankingLines[0] = (rhs1 - 4) / 3 + 1;
+        pBlankingLines[1] = (rhs2 - 5) / 3 + 1;
+    } else {
+        TRACE(IMX675_ERROR, "%s: Unsupported stitching mode %d\n",
+              __func__, pIMX675Ctx->SensorMode.stitching_mode);
+        return RET_NOTSUPP;
+    }
+
+    return RET_SUCCESS;
+}
+
+static RESULT IMX675_IsiGetHdrBlankingLinesIss(IsiSensorHandle_t handle,
+        uint32_t *pBlankingLines, size_t elementCount) {
+    RESULT result = RET_SUCCESS;
+    uint32_t rhs1 = 0, rhs2 = 0;
+
+    if (elementCount != 2) {
+        TRACE(IMX675_ERROR, "%s: Invalid element count %zu, expected 2\n",
+              __func__, elementCount);
+        return RET_OUTOFRANGE;
+    }
+
+// TODO: Find a way to use the real RHS1 and RHS2 values
+#ifdef READ_DEFAULT_FROM_SENSOR
+    result = IMX675_ReadRHS1(handle, &rhs1);
+    if (result != RET_SUCCESS) {
+        TRACE(IMX675_ERROR, "%s: Unable to read RHS1, result: %d\n", __func__, result);
+        return result;
+    }
+
+    result = IMX675_ReadRHS2(handle, &rhs2);
+    if (result != RET_SUCCESS) {
+        TRACE(IMX675_ERROR, "%s: Unable to read RHS2, result: %d\n", __func__, result);
+        return result;
+    }
+
+#else
+    // For now, this will only work in 2DOL mode
+    rhs1 = IMX675_2DOL_RHS1;
+    rhs2 = 0;
+#endif
+
+    result = IMX675_IsiCalculateHdrBlankingLinesIss(handle, pBlankingLines, rhs1, rhs2);
+    return result;
+}
+
 RESULT IMX675_IsiGetSensorIss(IsiSensor_t* pIsiSensor) {
     RESULT result = RET_SUCCESS;
     static const char SensorName[16] = "IMX675";
@@ -2261,6 +2618,7 @@ RESULT IMX675_IsiGetSensorIss(IsiSensor_t* pIsiSensor) {
 		pIsiSensor->pIsiGetIrisLimitsIss = 					IMX675_IsiGetIrisLimitsIss;
 		pIsiSensor->pIsiSetIrisLimitsIss = 					IMX675_IsiSetIrisLimitsIss;
 		pIsiSensor->pIsiGetIntegrationTimeLimitsIss =		IMX675_IsiGetIntegrationTimeLimitsIss;
+		 pIsiSensor->pIsiGetAbsoluteIntegrationTimeLimitsIss =		IMX675_IsiGetAbsoluteIntegrationTimeLimitsIss;
 
 		pIsiSensor->pIsiExposureControlIss =				IMX675_IsiExposureControlIss;
 		pIsiSensor->pIsiExposureControlExpandedIss =		IMX675_IsiExposureControlExpandedIss;
@@ -2268,16 +2626,12 @@ RESULT IMX675_IsiGetSensorIss(IsiSensor_t* pIsiSensor) {
 
 		pIsiSensor->pIsiGetLongIntegrationTimeIss =			IMX675_IsiGetLEFIntegrationTimeIss;
 		pIsiSensor->pIsiGetIntegrationTimeIss =				IMX675_IsiGetIntegrationTimeIss;
-#ifndef BRINGUP_CONFIG
 		pIsiSensor->pIsiGetShortIntegrationTimeIss =		IMX675_IsiGetSEF1IntegrationTimeIss;
-#endif // BRINGUP_CONFIG
 		pIsiSensor->pIsiGetVSIntegrationTimeIss =			IMX675_IsiGetSEF2IntegrationTimeIss;
 
 		pIsiSensor->pIsiGetLongGainIss = 					IMX675_IsiGetLEFGainIss;
 		pIsiSensor->pIsiGetGainIss = 						IMX675_IsiGetGainIss;
-#ifndef BRINGUP_CONFIG
 		pIsiSensor->pIsiGetShortGainIss = 					IMX675_IsiGetSEF1GainIss;
-#endif // BRINGUP_CONFIG
 		pIsiSensor->pIsiGetVSGainIss = 						IMX675_IsiGetSEF2GainIss;
 
 		pIsiSensor->pIsiGetGainIncrementIss =				IMX675_IsiGetGainIncrementIss;
@@ -2293,6 +2647,8 @@ RESULT IMX675_IsiGetSensorIss(IsiSensor_t* pIsiSensor) {
 		pIsiSensor->pIsiGetStartEvIss = 					IMX675_IsiGetStartEvIss;
         pIsiSensor->pIsiGetIrisIss =						IMX675_IsiGetIrisIss;
         pIsiSensor->pIsiSetIrisIss =						IMX675_IsiSetIrisIss;
+        pIsiSensor->pIsiGetHCGIss =                         IMX675_IsiGetHCGIss;
+        pIsiSensor->pIsiSetHCGIss =                         IMX675_IsiSetHCGIss;
 
         /* SENSOR ISP */
         pIsiSensor->pIsiGetIspStatusIss = IMX675_IsiGetIspStatusIss;
@@ -2308,6 +2664,7 @@ RESULT IMX675_IsiGetSensorIss(IsiSensor_t* pIsiSensor) {
         // IMX675_IsiGetCompressCurveIss; pIsiSensor->pIsiExtendFuncIss =
         // IMX675_IsiExtendFuncIss; pIsiSensor->pIsiGetOtpDataIss =
         // IMX675_IsiGetOtpDataIss;
+        pIsiSensor->pIsiGetHdrBlankingLinesIss = IMX675_IsiGetHdrBlankingLinesIss;
 
         /* AF */
         pIsiSensor->pIsiFocusCreateIss = IMX675_IsiFocusCreateIss;

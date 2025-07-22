@@ -73,6 +73,7 @@ CREATE_TRACER(IMX678_REG_DEBUG, "IMX678: ", INFO, 1);
 #define IMX678_VMAX_2DOL_HDR 4500
 #define IMX678_VMAX_MAX 135000
 #define IMX678_MIN_SHR 3
+#define IMX678_MIN_LINES 1
 #define IMX678_MAX_GAIN_AEC                                                    \
     (32.0f) /**< max. gain used by the AEC (arbitrarily chosen, hardware limit \
                = 62.0, driver limit = 32.0 ) */
@@ -94,9 +95,9 @@ CREATE_TRACER(IMX678_REG_DEBUG, "IMX678: ", INFO, 1);
 #define DEFAULT_RHS1_3DOL 0x1F3
 #define DEFAULT_RHS2_3DOL 0x230
 #define DEFAULT_RHS1_2DOL 0x11B
-#define DEFAULT_RHS2_2DOL 0x53
 #define MICRO_2_NANO 1000
 #define IMX678_2DOL_NUM_EXP 2
+#define IMX678_3DOL_NUM_EXP 3
 
 FlickerModePeaksPerSec flickerPeaksPerSecMap[] = {
     { ISI_AE_ANTIBANDING_MODE_OFF, 0 },
@@ -867,6 +868,50 @@ static inline int IMX678_getFlickerPeaksPerSec(IsiSensorAntibandingMode_t mode) 
     return 0; // Defaults to 0 if mode not found
 }
 
+static size_t IMX678_GetNumExposures(IMX678_Context_t* pIMX678Ctx) {
+    if (pIMX678Ctx == NULL) {
+        return 0;
+    }
+
+    if (pIMX678Ctx->SensorMode.hdr_mode == SENSOR_MODE_LINEAR) {
+        return 1; // SDR
+    } else if (pIMX678Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
+        return IMX678_2DOL_NUM_EXP;
+    } else if (pIMX678Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
+        return IMX678_3DOL_NUM_EXP;
+    } else {
+        TRACE(IMX678_ERROR, "%s: Unsupported HDR mode %d with stitching mode %d\n",
+              pIMX678Ctx->SensorMode.hdr_mode, pIMX678Ctx->SensorMode.stitching_mode);
+        return 0;
+    }
+}
+
+static RESULT IMX678_UpdateCurrLEFIntegrationTimeFromFsc(IMX678_Context_t* pIMX678Ctx, uint32_t fsc, uint32_t shr0) {
+    if (pIMX678Ctx == NULL) {
+        return RET_NULL_POINTER;
+    }
+
+    float configuredIntegrationTime = (fsc - shr0) * pIMX678Ctx->one_line_exp_time;
+
+    pIMX678Ctx->OldIntegrationTime = configuredIntegrationTime;
+    pIMX678Ctx->AecCurIntegrationTimeLEF = configuredIntegrationTime;
+
+    TRACE(IMX678_DEBUG, "%s: Updated LEF Integration Time = (fsc[%u] - shr0[%u]) * one_line_exp_time[%f] = %f\n",
+          __func__, fsc, shr0, pIMX678Ctx->one_line_exp_time, configuredIntegrationTime);
+    return RET_SUCCESS;
+}
+
+static RESULT IMX678_UpdateCurrLEFIntegrationTimeFromVmax(IMX678_Context_t* pIMX678Ctx, uint32_t vmax, uint32_t shr0) {
+    if (pIMX678Ctx == NULL) {
+        return RET_NULL_POINTER;
+    }
+
+    size_t dol = IMX678_GetNumExposures(pIMX678Ctx);
+    uint32_t fsc = vmax * dol;
+    TRACE(IMX678_DEBUG, "%s: fsc = vmax[%u] * dol[%zu] = %u\n", __func__, vmax, dol, fsc);
+    return IMX678_UpdateCurrLEFIntegrationTimeFromFsc(pIMX678Ctx, fsc, shr0);
+}
+
 static inline uint32_t IMX678_getNewVmaxAntiFlicker(IMX678_Context_t *pIMX678Ctx, uint32_t requestedVmax) {
     uint32_t closestVmax = requestedVmax;
     int peaks = 0;
@@ -967,9 +1012,7 @@ static RESULT IMX678_IsiLimitFpsIss(IsiSensorHandle_t handle) {
         result |= IMX678_UnlockRegHold(handle);
 
         int shr = MAX((int)current_vmax - (int)(pIMX678Ctx->AecCurIntegrationTimeLEF / pIMX678Ctx->one_line_exp_time), IMX678_MIN_SHR);
-        float configuredIntegrationTime = (new_vmax - shr) * pIMX678Ctx->one_line_exp_time;
-        pIMX678Ctx->OldIntegrationTime = configuredIntegrationTime;
-        pIMX678Ctx->AecCurIntegrationTimeLEF = configuredIntegrationTime;
+        result |= IMX678_UpdateCurrLEFIntegrationTimeFromVmax(pIMX678Ctx, new_vmax, shr);
     }
 
     pIMX678Ctx->MaxIntegrationLine =
@@ -1046,6 +1089,32 @@ static RESULT IMX678_IsiGetIntegrationTimeLimitsIss(
 
     *pMinIntegrationTime = pIMX678Ctx->AecMinIntegrationTime;
     *pMaxIntegrationTime = pIMX678Ctx->AecMaxIntegrationTime;
+
+    TRACE(IMX678_INFO, "%s: (exit) %f, %f\n", 
+    __func__, *pMinIntegrationTime, *pMaxIntegrationTime);
+    return (result);
+}
+
+static RESULT IMX678_IsiGetAbsoluteIntegrationTimeLimitsIss(
+    IsiSensorHandle_t handle, float* pMinIntegrationTime,
+    float* pMaxIntegrationTime) {
+    IMX678_Context_t* pIMX678Ctx = (IMX678_Context_t*)handle;
+    RESULT result = RET_SUCCESS;
+
+    TRACE(IMX678_INFO, "%s: (enter)\n", __func__);
+    if (pIMX678Ctx == NULL) {
+        TRACE(IMX678_ERROR,
+              "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        return (RET_WRONG_HANDLE);
+    }
+
+    if ((pMinIntegrationTime == NULL) || (pMaxIntegrationTime == NULL)) {
+        TRACE(IMX678_ERROR, "%s: NULL pointer received!!\n", __func__);
+        return (RET_NULL_POINTER);
+    }
+
+    *pMinIntegrationTime = IMX678_MIN_LINES * pIMX678Ctx->one_line_exp_time;
+    *pMaxIntegrationTime =  (IMX678_VMAX_MAX - IMX678_MIN_SHR) * pIMX678Ctx->one_line_exp_time;
 
     TRACE(IMX678_INFO, "%s: (exit) %f, %f\n", 
     __func__, *pMinIntegrationTime, *pMaxIntegrationTime);
@@ -1318,7 +1387,7 @@ RESULT IMX678_IsiSetSEF2GainIss(IsiSensorHandle_t handle,
 
 	if (!pSetGain || !hdr_ratio)
 		return (RET_NULL_POINTER);
-
+	
 	TRACE(IMX678_DEBUG, "%s: got NewGain %f\n",
 	__func__, NewGain);
 
@@ -1356,7 +1425,7 @@ RESULT IMX678_IsiGetIntegrationTimeIss(IsiSensorHandle_t handle,
 	
 	if (pIMX678Ctx->enableHdr)
 		return IMX678_IsiGetSEF1IntegrationTimeIss(handle, pSetIntegrationTime);
-
+	
 	return IMX678_IsiGetLEFIntegrationTimeIss(handle, pSetIntegrationTime);
 }
 
@@ -1589,10 +1658,8 @@ RESULT IMX678_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
         result |= IMX678_WriteShr0(handle, shr);
         result |= IMX678_UnlockRegHold(handle);
 
-        float configuredIntegrationTime =
-            (new_vmax - shr) * pIMX678Ctx->one_line_exp_time;
-        pIMX678Ctx->OldIntegrationTime = configuredIntegrationTime;
-        pIMX678Ctx->AecCurIntegrationTimeLEF = configuredIntegrationTime;
+        // In this context, the "new_vmax" is actually the FSC (multiplied by DOL), not the VMAX.
+        result |= IMX678_UpdateCurrLEFIntegrationTimeFromFsc(pIMX678Ctx, new_vmax, shr);
 
         *pNumberOfFramesToSkip = 1U;
     } else {
@@ -1792,20 +1859,20 @@ RESULT IMX678_Calculate3DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
     long_it 		= NewIntegrationTime * hdr_ratio[0];
     short_it 		= NewIntegrationTime;
     very_short_it 	= NewIntegrationTime / hdr_ratio[1];
-
-    TRACE(IMX678_DEBUG, "%s: requested IT long: %f, short: %f, very_short: %f\n",
+    
+    TRACE(IMX678_DEBUG, "%s: requested IT long: %f, short: %f, very_short: %f\n", 
     __func__, long_it, short_it, very_short_it);
     long_exp_val 		= long_it / pIMX678Ctx->one_line_exp_time;
     short_exp_val 		= short_it / pIMX678Ctx->one_line_exp_time;
     very_short_exp_val 	= very_short_it / pIMX678Ctx->one_line_exp_time;
 
-    TRACE(IMX678_DEBUG, "%s: requested IT in lines long: %f, short: %f, very_short: %f\n",
+    TRACE(IMX678_DEBUG, "%s: requested IT in lines long: %f, short: %f, very_short: %f\n", 
     __func__, long_exp_val, short_exp_val, very_short_exp_val);
     long_exp_val 		= IMX678_VMAX_3DOL_HDR - long_exp_val;
     short_exp_val 		= rhs1 - short_exp_val;
     very_short_exp_val 	= rhs2 - very_short_exp_val;
 
-    TRACE(IMX678_DEBUG, "%s: requested IT in shr long: %f, short: %f, very_short: %f\n",
+    TRACE(IMX678_DEBUG, "%s: requested IT in shr long: %f, short: %f, very_short: %f\n", 
     __func__, long_exp_val, short_exp_val, very_short_exp_val);
     if(long_exp_val < rhs2 + IMX678_SHR0_RHS2_GAP) {
         long_exp_val = rhs2 + IMX678_SHR0_RHS2_GAP;
@@ -1891,7 +1958,7 @@ RESULT IMX678_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 	float short_gain = 1;
 	bool calculate_gain = false;
 	uint32_t rhs1;
-	uint32_t vmax = IMX678_VMAX_2DOL_HDR;
+	uint32_t vmax = IMX678_VMAX_2DOL_HDR; 
 	bool optimize_gain = false;
 
     if (pIMX678Ctx == NULL || o_long_it == NULL ||
@@ -1908,7 +1975,7 @@ RESULT IMX678_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 
 	rhs1 = pIMX678Ctx->cur_rhs1;
 
-    TRACE(IMX678_DEBUG, "%s: hdr_ratio[0] = LS Ratio = %f\n",
+    TRACE(IMX678_DEBUG, "%s: hdr_ratio[0] = LS Ratio = %f\n", 
     __func__, hdr_ratio[0]);
     
     // Sometimes there is no actual input gain. In that case, we will read it from the sensor
@@ -1940,14 +2007,14 @@ RESULT IMX678_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
     // assume gain is 1 and see if ratio can be achieved with integration time
     long_it 		= NewIntegrationTime * hdr_ratio[0];
     short_it 		= NewIntegrationTime;
-
-    TRACE(IMX678_DEBUG, "%s: requested IT long: %f, short: %f\n",
+    
+    TRACE(IMX678_DEBUG, "%s: requested IT long: %f, short: %f\n", 
     __func__, long_it, short_it);
     long_exp_val 		= long_it / pIMX678Ctx->one_line_exp_time;
     short_exp_val 		= short_it / pIMX678Ctx->one_line_exp_time;
 
-    TRACE(IMX678_DEBUG, "%s: requested IT in lines long: %f, short: %f\n",
-    _func__, long_exp_val, short_exp_val);
+    TRACE(IMX678_DEBUG, "%s: requested IT in lines long: %f, short: %f\n", 
+    __func__, long_exp_val, short_exp_val);
     long_exp_val 		= vmax - long_exp_val;
     short_exp_val 		= rhs1 - short_exp_val;
 
@@ -2059,7 +2126,7 @@ RESULT IMX678_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
                                         &long_gain, &short_gain, &very_short_gain,
                                         hdr_ratio);
         }
-
+        
         if (result != RET_SUCCESS) {
             TRACE(IMX678_ERROR, "%s: CalculateHDRExposures failed\n", __func__);
             return result;
@@ -2211,20 +2278,17 @@ RESULT IMX678_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
     
     if (current_vmax != requested_vmax) {
         shr = MAX( (int)requested_vmax - (int)current_vmax + (int)shr , IMX678_MIN_SHR);
+        TRACE(IMX678_DEBUG, "%s - writing 0x%x to VMAX, writing 0x%x to SHR0\n", __func__, requested_vmax, shr);
+        
         result |= IMX678_LockRegHold(handle);
         result |= IMX678_WriteVmax(handle, requested_vmax);
         result |= IMX678_WriteShr0(handle, shr);
         result |= IMX678_UnlockRegHold(handle);
+        result |= IMX678_UpdateCurrLEFIntegrationTimeFromVmax(handle, requested_vmax, shr);
         if (result != RET_SUCCESS) {
             TRACE(IMX678_ERROR, "%s: Unable to write VMAX or Shr0\n", __func__);
             return (result);
         }
-        TRACE(IMX678_DEBUG, "%s - writing 0x%x to VMAX, writing 0x%x to SHR0\n", __func__, requested_vmax, shr);
-
-        float configuredIntegrationTime = (requested_vmax - shr) * pIMX678Ctx->one_line_exp_time;
-        pIMX678Ctx->OldIntegrationTime = configuredIntegrationTime;
-        pIMX678Ctx->AecCurIntegrationTimeLEF = configuredIntegrationTime;
-        TRACE(IMX678_DEBUG, "%s: Ti=%f\n", __func__, configuredIntegrationTime);
     }
     
     pIMX678Ctx->MaxIntegrationLine = MAX( MIN(requested_vmax - IMX678_MIN_SHR, IMX678_VMAX_MAX - IMX678_MIN_SHR), 1);
@@ -2478,6 +2542,7 @@ RESULT IMX678_IsiGetSensorIss(IsiSensor_t* pIsiSensor) {
 		pIsiSensor->pIsiGetIrisLimitsIss = 					IMX678_IsiGetIrisLimitsIss;
 		pIsiSensor->pIsiSetIrisLimitsIss = 					IMX678_IsiSetIrisLimitsIss;
 		pIsiSensor->pIsiGetIntegrationTimeLimitsIss =		IMX678_IsiGetIntegrationTimeLimitsIss;
+		pIsiSensor->pIsiGetAbsoluteIntegrationTimeLimitsIss =		IMX678_IsiGetAbsoluteIntegrationTimeLimitsIss;
 
 		pIsiSensor->pIsiExposureControlIss =				IMX678_IsiExposureControlIss;
 		pIsiSensor->pIsiExposureControlExpandedIss =		IMX678_IsiExposureControlExpandedIss;

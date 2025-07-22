@@ -58,6 +58,7 @@ CREATE_TRACER(IMX334_REG_DEBUG, "IMX334: ", INFO, 1);
 
 #define IMX334_IRIS_MIN_VAL 1
 #define IMX334_IRIS_MAX_VAL 1
+#define IMX334_MIN_LINES 1
 #define IMX334_MIN_GAIN_STEP                                          \
     (0.035) /**< min gain step size used by GUI (hardware min = 1/16; \
                1/16..32/16 depending on actual gain ) */
@@ -801,6 +802,32 @@ static RESULT IMX334_IsiGetIntegrationTimeLimitsIss(
     return (result);
 }
 
+static RESULT IMX334_IsiGetAbsoluteIntegrationTimeLimitsIss(
+    IsiSensorHandle_t handle, float* pMinIntegrationTime,
+    float* pMaxIntegrationTime) {
+    IMX334_Context_t* pIMX334Ctx = (IMX334_Context_t*)handle;
+    RESULT result = RET_SUCCESS;
+
+    TRACE(IMX334_INFO, "%s: (enter)\n", __func__);
+    if (pIMX334Ctx == NULL) {
+        TRACE(IMX334_ERROR,
+              "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        return (RET_WRONG_HANDLE);
+    }
+
+    if ((pMinIntegrationTime == NULL) || (pMaxIntegrationTime == NULL)) {
+        TRACE(IMX334_ERROR, "%s: NULL pointer received!!\n", __func__);
+        return (RET_NULL_POINTER);
+    }
+
+    *pMinIntegrationTime = IMX334_MIN_LINES * pIMX334Ctx->one_line_exp_time;
+    *pMaxIntegrationTime =  (IMX334_VMAX_MAX - IMX334_MIN_SHR) * pIMX334Ctx->one_line_exp_time;
+
+    TRACE(IMX334_INFO, "%s: (exit) %f, %f\n", 
+    __func__, *pMinIntegrationTime, *pMaxIntegrationTime);
+    return (result);
+}
+
 RESULT IMX334_IsiGetGainIss(IsiSensorHandle_t handle, float *pSetGain) {
     IMX334_Context_t *pIMX334Ctx = (IMX334_Context_t *)handle;
     RESULT result = RET_SUCCESS;
@@ -1358,6 +1385,7 @@ RESULT IMX334_IsiGetSensorIss(IsiSensor_t *pIsiSensor) {
         pIsiSensor->pIsiGetGainLimitsIss = IMX334_IsiGetGainLimitsIss;
         pIsiSensor->pIsiGetIntegrationTimeLimitsIss =
             IMX334_IsiGetIntegrationTimeLimitsIss;
+        pIsiSensor->pIsiGetAbsoluteIntegrationTimeLimitsIss = IMX334_IsiGetAbsoluteIntegrationTimeLimitsIss;
         pIsiSensor->pIsiGetIrisLimitsIss = IMX334_IsiGetIrisLimitsIss;
         pIsiSensor->pIsiSetIrisLimitsIss = IMX334_IsiSetIrisLimitsIss;
         pIsiSensor->pIsiGetVSGainIss = IMX334_IsiGetSEF1GainIss;
