@@ -101,14 +101,14 @@ long memalloc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
         if(ret)
                 return -EFAULT;
 
-        spin_lock(&mem_lock);
-
         switch (cmd) {
 	case MEMALLOC_IOCGMEMBASE:
 		__put_user(alloc_base, (unsigned long *) arg);
 		break;
         case MEMALLOC_IOCHARDRESET:
+                spin_lock(&mem_lock);
                 ResetMems();
+                spin_unlock(&mem_lock);
                 break;
         case MEMALLOC_IOCXGETBUFFER:
                 ret = copy_from_user(&memparams, (MemallocParams*)arg,
@@ -118,7 +118,9 @@ long memalloc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
                         break;
                 }
 
+                spin_lock(&mem_lock);
                 ret = AllocMemory(&memparams.busAddress, memparams.size);
+                spin_unlock(&mem_lock);
                 memparams.translationOffset = addr_transl;
                 ret |= copy_to_user((MemallocParams*)arg, &memparams,
                                     sizeof(MemallocParams));
@@ -126,11 +128,11 @@ long memalloc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
                 break;
         case MEMALLOC_IOCSFREEBUFFER:
                 __get_user(busaddr, (unsigned long *) arg);
+                spin_lock(&mem_lock);
                 ret = FreeMemory(busaddr);
+                spin_unlock(&mem_lock);
                 break;
         }
-
-        spin_unlock(&mem_lock);
 
         return ret ? -EFAULT: 0;
 }
