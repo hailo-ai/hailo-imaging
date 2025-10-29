@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include <linux/v4l2-subdev.h>
+#include "../../../common/ioctl_cmds.h"
 
 #define NUM_SECONDS 10
 #define MAX_CTRL_NAME_LEN 32
@@ -23,16 +24,6 @@ typedef struct QExtCtrlsList_s {
   struct v4l2_query_ext_ctrl *qExtCtrl;
   struct QExtCtrlsList_s *next;
 } QExtCtrlsList_t;
-
-static int xioctl(int fh, uint32_t request, void *arg) {
-  int r;
-
-  do {
-    r = ioctl(fh, request, arg);
-  } while (-1 == r && EINTR == errno);
-
-  return r;
-}
 
 static int open_device(char *dev_name) {
   struct stat st;

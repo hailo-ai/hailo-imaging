@@ -12,6 +12,7 @@
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <linux/v4l2-subdev.h>
+#include "../../../common/ioctl_cmds.h"
 
 #define MAX_NUM_OF_PLANES (3)
 #define EXPECTED_FRAMES (30)
@@ -302,17 +303,6 @@ static void errno_exit(const char *s)
 {
 	fprintf(stderr, "%s error %d, %s\n", s, errno, strerror(errno));
 	exit(EXIT_FAILURE);
-}
-
-static int xioctl(int fh, uint32_t request, void *arg)
-{
-	int r;
-
-	do {
-		r = ioctl(fh, request, arg);
-	} while (-1 == r && EINTR == errno);
-
-	return r;
 }
 
 static int open_device(char *dev_name)

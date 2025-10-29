@@ -54,7 +54,7 @@ endif
 CC += -I$(obj)
 EXTRA_CFLAGS += -g
 
-# Print debugging messages from the device 
+# Print debugging messages from the device
 #EXTRA_CFLAGS	+= -DHX280ENC_DEBUG
 
 snapshot := $(wildcard $(obj)/.snapshot)
@@ -76,7 +76,7 @@ KVER := $(shell uname -r)
 KDIR=/local/users/bu_env/hailo-yocto-validation/build/tmp/work-shared/hailo15-evb-2-camera-vpu/kernel-build-artifacts/
 
 PWD		:= $(shell pwd)
-DEST		:= /lib/modules/$(KERNELRELEASE)/$(MDIR)
+DEST	:= /lib/modules/$(KERNELRELEASE)/$(MDIR)
 
 # which files to install?
 inst-m		:= $(wildcard *.ko)
@@ -98,7 +98,7 @@ install::
 clean::
 	$(MAKE) -C $(KDIR) SUBDIRS=$(PWD) clean
 	-rm -f .version
-        
+
 #################################################
 # build tarballs
 
@@ -125,4 +125,3 @@ snapshot snap tarball: clean
 
 %.asm: %.o
 	objdump -S $< > $@
-

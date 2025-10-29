@@ -1,21 +1,21 @@
 /*
  *  H2 Encoder device driver (kernel module)
- *  
+ *
  *  COPYRIGHT(C) 2014 VERISILICON
  *
- * This program is free software; you can redistribute it and/or 
- * modify it under the terms of the GNU General Public License 
- * as published by the Free Software Foundation; either version 2 
- * of the License, or (at your option) any later version. 
- * This program is distributed in the hope that it will be useful, 
- * but WITHOUT ANY WARRANTY; without even the implied warranty of 
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the 
- * GNU General Public License for more details. 
- * 
- * You should have received a copy of the GNU General Public License 
- * along with this program; if not, write to the Free Software 
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, 
- * USA. 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301,
+ * USA.
  *
  * Copyright (c) 2015 - 2017 Cadence Design Systems, Inc.
  */
@@ -24,7 +24,7 @@
 #include <linux/module.h>
 /* needed for __init,__exit directives */
 #include <linux/init.h>
-/* needed for remap_page_range 
+/* needed for remap_page_range
 	SetPageReserved
 	ClearPageReserved
 */
@@ -122,6 +122,7 @@ MODULE_DESCRIPTION("H2 Encoder driver");
 
 unsigned long base_port = INTEGRATOR_LOGIC_MODULE0_BASE;
 int irq = HW_INTERRUPTS__H265_INT_IRQ;
+unsigned long max_cmem_size = 512*1024*1024;
 
 /* module_param(name, type, perm) */
 module_param(base_port, ulong, 0);
@@ -143,7 +144,6 @@ typedef struct
     volatile u8 *hwregs;
     unsigned int irq;
     struct fasync_struct *async_queue;
-    unsigned int mem_base;
     unsigned int mem_size;
     struct device*       dma_dev;
     struct cdev cdev;
@@ -227,8 +227,6 @@ static int CheckEncIrq(hx280enc_t *dev)
 }
 unsigned int WaitEncReady(hx280enc_t *dev)
 {
-    
-
    if(!wait_event_timeout(enc_wait_queue, CheckEncIrq(dev),
       msecs_to_jiffies(HX280ENC_IRQ_TIMEOUT_MSEC)))
    {
@@ -272,58 +270,101 @@ static long hx280enc_ioctl(struct file *filp,
     switch (cmd)
     {
     case HX280ENC_IOCGHWOFFSET:
-        __put_user(hx280enc_data.iobaseaddr, (unsigned long *) arg);
+        if (put_user(hx280enc_data.iobaseaddr, (unsigned long *) arg)) {
+            pr_err("%s: Failed to copy HW offset to user\n", __func__);
+            return -EFAULT;
+        }
         break;
 
     case HX280ENC_IOCGHWIOSIZE:
-        __put_user(hx280enc_data.iosize, (unsigned int *) arg);
+        if (put_user(hx280enc_data.iosize, (unsigned int *) arg)) {
+            pr_err("%s: Failed to copy HW IO size to user\n", __func__);
+            return -EFAULT;
+        }
         break;
-    
+
     case HX280ENC_IOCG_CORE_WAIT:
     {
         //pr_info("HX280ENC_IOCG_CORE_WAIT\n");
         tmp = WaitEncReady(&hx280enc_data);
         if(tmp)
             return tmp;
-        __put_user(asic_status, (unsigned int *)arg);
+        if (put_user(asic_status, (unsigned int *)arg)) {
+            pr_err("%s: Failed to copy ASIC status to user\n", __func__);
+            return -EFAULT;
+        }
         break;
     }
     case HX280ENC_IOCXVIRT2BUS:
-        address_translation_t *addresses = (address_translation_t *)arg;
+    {
+        address_translation_t addresses;
         long rc = -EINVAL;
         phys_addr_t paddr = 0;
-        rc = hx280enc_virt_to_phys(addresses->vaddr, addresses->size, &paddr);
+
+        if (copy_from_user(&addresses, (address_translation_t *)arg, sizeof(address_translation_t))) {
+            pr_err("%s: Failed to copy address translation from user\n", __func__);
+            return -EFAULT;
+        }
+
+        rc = hx280enc_virt_to_phys(addresses.vaddr, addresses.size, &paddr);
         if (rc < 0)
         {
-            pr_err("%s: Could not retrieve physical address of address %08lx, size %08lx", 
-                    __func__, addresses->vaddr, addresses->size);
+            pr_err("%s: Could not retrieve physical address of address %08lx, size %08lx",
+                    __func__, addresses.vaddr, addresses.size);
             return rc;
         }
-        __put_user(paddr, (unsigned long *)&(addresses->paddr));
+
+        addresses.paddr = paddr;
+        if (copy_to_user((address_translation_t *)arg, &addresses, sizeof(address_translation_t))) {
+            pr_err("%s: Failed to copy address translation to user\n", __func__);
+            return -EFAULT;
+        }
         break;
+    }
     case HX280ENC_IOC_SHARE_DMABUF:
-        dmabuf_mapping_t *dmabuf_mapping = (dmabuf_mapping_t *)arg;
+    {
+        dmabuf_mapping_t dmabuf_mapping;
         unsigned long dmabuf_phys = 0;
-        if (hx280enc_share_dmabuf(dmabuf_mapping->fd, &dmabuf_phys))
+
+        if (copy_from_user(&dmabuf_mapping, (dmabuf_mapping_t *)arg, sizeof(dmabuf_mapping_t))) {
+            pr_err("%s: Failed to copy dmabuf mapping from user\n", __func__);
+            return -EFAULT;
+        }
+
+        if (hx280enc_share_dmabuf(dmabuf_mapping.fd, &dmabuf_phys))
         {
-            pr_err("%s: Could not share dmabuf for fd %d", __func__, dmabuf_mapping->fd);
+            pr_err("%s: Could not share dmabuf for fd %d", __func__, dmabuf_mapping.fd);
             return -EINVAL;
         }
-        __put_user(dmabuf_phys, (unsigned long *)&(dmabuf_mapping->paddr));
+
+        dmabuf_mapping.paddr = dmabuf_phys;
+        if (copy_to_user((dmabuf_mapping_t *)arg, &dmabuf_mapping, sizeof(dmabuf_mapping_t))) {
+            pr_err("%s: Failed to copy dmabuf mapping to user\n", __func__);
+            return -EFAULT;
+        }
         break;
+    }
     case HX280ENC_IOC_UNSHARE_DMABUF:
-        int *fd = (int *)arg;
+    {
+        int fd;
+
+        if (copy_from_user(&fd, (int *)arg, sizeof(int))) {
+            pr_err("%s: Failed to copy fd from user\n", __func__);
+            return -EFAULT;
+        }
+
         mutex_lock(&hx280enc_data.mlock_shared_dmabufs);
-        if(hx280enc_unshare_dmabuf(*fd))
+        if(hx280enc_unshare_dmabuf(fd))
         {
-            pr_err("%s: Could not unshare dmabuf for fd %d", __func__, *fd);
+            pr_err("%s: Could not unshare dmabuf for fd %d", __func__, fd);
             mutex_unlock(&hx280enc_data.mlock_shared_dmabufs);
             return -EINVAL;
         }
         mutex_unlock(&hx280enc_data.mlock_shared_dmabufs);
         break;
+    }
     case HX280ENC_IOCHARDRESET:
-        printk(KERN_DEBUG "HX280ENC_IOCHARDRESET - resetting ASIC\n");
+        printk(KERN_INFO "HX280ENC_IOCHARDRESET - resetting ASIC\n");
         if(ResetAsicHard(&hx280enc_data))
         {
             pr_err("%s: Could not reset ASIC", __func__);
@@ -332,8 +373,8 @@ static long hx280enc_ioctl(struct file *filp,
         break;
     default:
         return memalloc_ioctl(filp, cmd, arg);
-        
     }
+
     return 0;
 }
 
@@ -615,7 +656,7 @@ static long hx280enc_pfn_virt_to_phys(struct vm_area_struct *vma, unsigned long 
         return ret;
 
     *paddr = __pfn_to_phys(pfn) + (vaddr & ~PAGE_MASK);
-    
+
     for (i = 1; i < nr_pages; ++i) {
         unsigned long next_pfn;
         phys_addr_t next_phys;
@@ -659,8 +700,6 @@ static int vc8000e_probe(struct platform_device *pdev)
 {
     int result,irq;
     struct device *dev = &pdev->dev;
-    struct device_node *node;
-    struct reserved_mem *rmem = NULL;
     struct reset_control *h265_reset = NULL;
     int ret;
 
@@ -701,16 +740,6 @@ static int vc8000e_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return irq;
 
-    node = of_parse_phandle(dev->of_node, "memory-region", 0);
-	if (node)
-		rmem = of_reserved_mem_lookup(node);
-	of_node_put(node);
-
-	if (!rmem) {
-		dev_err(dev, "unable to acquire memory-region\n");
-		return -EINVAL;
-	}
-
     h265_reset = devm_reset_control_get(dev,"h265-rst");
     if (IS_ERR(h265_reset)) {
         ret = PTR_ERR(h265_reset);
@@ -721,13 +750,10 @@ static int vc8000e_probe(struct platform_device *pdev)
     printk(KERN_INFO "hx280enc: module init - base_port=0x%08lx irq=%i\n",
            base_port, irq);
 
-    pr_info("Allocated reserved memory, paddr: 0x%0llX, size =0x%llx\n", rmem->base, rmem->size);
-
-    memalloc_init((unsigned int )rmem->base, (unsigned int) (rmem->size/(1024*1024)));
+    memalloc_init(&pdev->dev, max_cmem_size);
 
 
-    hx280enc_data.mem_base = (unsigned int )rmem->base;
-    hx280enc_data.mem_size = (unsigned int )rmem->size;
+    hx280enc_data.mem_size = max_cmem_size;
     hx280enc_data.iobaseaddr = base_port;
     hx280enc_data.iosize = ENC_IO_SIZE;
     hx280enc_data.irq = irq;
@@ -769,7 +795,7 @@ static int vc8000e_probe(struct platform_device *pdev)
 		pr_err("%s[%d]:cdev_add error!\n", __func__, __LINE__);
 		return ret;
 	}
-	hx280enc_data.class = hx280enc_class;    
+	hx280enc_data.class = hx280enc_class;
 	device_create(hx280enc_data.class, NULL, hx280enc_data.devt,
 			&hx280enc_data, "%s", ENCODER_DEVICE_NAME);
 
@@ -808,7 +834,7 @@ static int vc8000e_probe(struct platform_device *pdev)
       */
         result = devm_request_irq(&pdev->dev, irq, hx280enc_isr,
 				       IRQF_SHARED, "hx280enc", (void *) &hx280enc_data);
-		
+
         if(result == -EINVAL)
         {
             printk(KERN_ERR "hx280enc: Bad irq number or handler\n");
@@ -858,7 +884,7 @@ static int vc8000e_remove(struct platform_device *pdev)
     devise_register_index--;
     /* free the encoder IRQ */
     if(hx280enc_data.irq != -1)
-    {        
+    {
         //free_irq(hx280enc_data.irq, (void *) &hx280enc_data);
     }
 
@@ -962,7 +988,7 @@ irqreturn_t hx280enc_isr(int irq, void *dev_id)
     u32 minorId;
     u32 wClr;
     bool add_reset = false;
-	
+
     irq_status = readl(dev->hwregs + 0x04);
     if(irq_status & 0x01)
     {

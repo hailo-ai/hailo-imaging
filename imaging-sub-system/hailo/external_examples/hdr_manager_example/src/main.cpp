@@ -5,7 +5,7 @@
 #include <dirent.h>
 #include <fcntl.h> /* low-level i/o */
 #include <unistd.h>
-#include <signal.h>
+#include <csignal>
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -15,6 +15,7 @@
 #include <linux/v4l2-subdev.h>
 #include <sys/epoll.h>
 #include "hailo_stitch.hpp"
+#include "../../../common/ioctl_cmds.h"
 
 #define MAX_NUM_OF_PLANES 3
 #define DEFAULT_HEF_PATH "/usr/bin/hdr_4k_3_exposures.hef"
@@ -46,7 +47,7 @@ static HailortAsyncStitching* stitcher;
 static int raw_capture_fd = -1;
 static int isp_in_fd = -1;
 static int isp_in_buffers_all_used = 0;
-static unsigned char* wb_buffer;
+static unsigned char* wb_buffer = (unsigned char*)MAP_FAILED;
 static constexpr int wb_buffer_size = 12;
 static constexpr float wb_compensation = 0.03143406;
 std::unordered_map<std::string, struct v4l2_query_ext_ctrl> ctrl_map;
@@ -56,17 +57,6 @@ enum {
 	VIDEO_RAW_CAPTURE,
 	VIDEO_ISP_IN,
 };
-
-static int xioctl(int fh, uint32_t request, void *arg)
-{
-	int r;
-
-	do {
-		r = ioctl(fh, request, arg);
-	} while (-1 == r && EINTR == errno);
-
-	return r;
-}
 
 static int open_device(const char *dev_name)
 {
@@ -284,7 +274,7 @@ static void free_buffers(int path)
 	}
 
 	free(buffers[path]);
-	munmap(wb_buffer, wb_buffer_size);
+	buffers[path] = nullptr;
 }
 
 static int find_first_non_used_buffer(int path){
@@ -507,6 +497,8 @@ void updateWBGains(unsigned char* wbBuffer){
 		channels[channel] = ((float)channels_raw[channel]) / 256;
 		float channel_quant = channels[channel] / wb_compensation;
 		int channel_to_buffer = std::ceil(channel_quant);
+		// we need to limit the value to 127 because the NN-core will not accept values greater than 127
+		channel_to_buffer = std::min(channel_to_buffer, 127);
 		wbBuffer[channel] = channel_to_buffer;
 		wbBuffer[channel + 4] = channel_to_buffer;
 		wbBuffer[channel + 8] = channel_to_buffer;
@@ -547,100 +539,125 @@ void on_infer(void* ptr){
 	async_finished = 1;
 }
 
+static void cleanup() {
+    printf("stopping stream\n");
+    stop_stream(VIDEO_ISP_IN);
+    stop_stream(VIDEO_RAW_CAPTURE);
+
+    if (set_isp_mcm_mode(ISP_MCM_MODE_OFF)) {
+        printf("failed to set mcm mode to ISP_MCM_MODE_OFF\n");
+    } else {
+        printf("finished\n");
+    }
+
+    if (fd_video_yuv >= 0) {
+        close(fd_video_yuv);
+    }
+    
+    free_buffers(VIDEO_ISP_IN);
+    free_buffers(VIDEO_RAW_CAPTURE);
+
+	if(wb_buffer != MAP_FAILED)
+		munmap(wb_buffer, wb_buffer_size);
+
+    delete stitcher;
+    
+    close(isp_in_fd);
+    close(raw_capture_fd);
+}
+
+void signal_handler(int signal) {
+    printf("got signal %d, exiting...\n", signal);
+    cleanup();
+    exit(0);
+}
+
 int main(int argc, char *argv[])
 {
-	int ret;
-	ret = -EINVAL;
+	int ret = 0;
+
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
 
 	printf("Starting Hailo15 HDR manager\n");
 	
 	stitcher = new HailortAsyncStitching();
-	ret = stitcher->init(std::string(DEFAULT_HEF_PATH), std::string("0"), 1, 1000, DOL_NUM_EXP_RAW);
-	if (ret != 0) {
+	if (stitcher->init(std::string(DEFAULT_HEF_PATH), std::string("0"), 1, 1000, DOL_NUM_EXP_RAW) != 0) {
 		printf("unable to initialize stitcher\n");
-		exit(-1);
+		ret = -1;
+        goto cleanup_label;
 	}
 	stitcher->set_on_infer(on_infer);
+
+	if (set_isp_mcm_mode(ISP_MCM_MODE_STITCHING)) {
+		printf("failed to set mcm mode to ISP_MCM_MODE_STITCHING\n");
+		ret = -1;
+        goto cleanup_label;
+	}
+
 	raw_capture_fd = open_device("/dev/video2");
 	if (raw_capture_fd < 0) {
 		printf("unable to open raw capture video device\n");
-		exit(-1);
-	}
-
-	isp_in_fd = open_device("/dev/video3");
-	if (isp_in_fd < 0) {
 		ret = -1;
+        goto cleanup_label;
+	}
+
+	isp_in_fd = open_device("/dev/video10");
+	if (isp_in_fd < 0) {
 		printf("unable to open isp in video device\n");
-		goto err_video3;
+		ret = -1;
+        goto cleanup_label;
 	}
 
-	ret = set_format(VIDEO_RAW_CAPTURE, INPUT_WIDTH_4K, INPUT_HEIGHT_4K ,V4L2_PIX_FMT_SRGGB12, DOL_NUM_EXP_RAW);
-	if (ret) {
+	if (set_format(VIDEO_RAW_CAPTURE, INPUT_WIDTH_4K, INPUT_HEIGHT_4K ,V4L2_PIX_FMT_SRGGB12, DOL_NUM_EXP_RAW)) {
 		printf("unable to set format raw capture video device\n");
-		goto err_set_fmt_video2;
+		ret = -1;
+        goto cleanup_label;
 	}
 
-	ret = set_raw_capture_fps();
-	if(ret){
+	if(set_raw_capture_fps()){
 		printf("unable to set fps for raw capture video device\n");
-		goto err_set_fps;
+		ret = -1;
+        goto cleanup_label;
 	}
 
-	ret = set_format(VIDEO_ISP_IN, INPUT_WIDTH_4K, INPUT_HEIGHT_4K, V4L2_PIX_FMT_SRGGB12, DOL_NUM_EXP_STITCHED);
-	if (ret) {
+	if (set_format(VIDEO_ISP_IN, INPUT_WIDTH_4K, INPUT_HEIGHT_4K, V4L2_PIX_FMT_SRGGB12, DOL_NUM_EXP_STITCHED)) {
 		printf("unable to set format isp in video device\n");
-		goto err_set_fmt_video3;
+		ret = -1;
+        goto cleanup_label;
 	}
 
-	ret = init_buffers(VIDEO_RAW_CAPTURE, DOL_NUM_EXP_RAW);
-	if (ret) {
+	if (init_buffers(VIDEO_RAW_CAPTURE, DOL_NUM_EXP_RAW)) {
 		printf("unable to init buffers raw capture video device\n");
-		goto err_init_buffers_video2;
+		ret = -1;
+        goto cleanup_label;
 	}
 
-	ret = init_buffers(VIDEO_ISP_IN, DOL_NUM_EXP_STITCHED);
-	if (ret) {
+	if (init_buffers(VIDEO_ISP_IN, DOL_NUM_EXP_STITCHED)) {
 		printf("unable to init buffers isp in video device\n");
-		goto err_init_buffers_video3;
+		ret = -1;
+        goto cleanup_label;
 	}
 
-	ret = queue_buffers(VIDEO_RAW_CAPTURE);
-	if (ret) {
+	if (queue_buffers(VIDEO_RAW_CAPTURE)) {
 		printf("unable to queue buffers video2\n");
-		goto err_queue_buffers_video2;
+		ret = -1;
+        goto cleanup_label;
 	}
 
-	ret = start_stream(VIDEO_RAW_CAPTURE);
-	if (ret) {
+	if (start_stream(VIDEO_RAW_CAPTURE)) {
 		printf("unable to start stream video2\n");
-		goto err_start_stream_video2;
+		ret = -1;
+        goto cleanup_label;
 	}
-	ret = start_stream(VIDEO_ISP_IN);
-	if (ret) {
+	if (start_stream(VIDEO_ISP_IN)) {
 		printf("unable to start stream video3\n");
-		goto err_start_stream_video3;
+		ret = -1;
+        goto cleanup_label;
 	}
 	mcm_loop();
 
-	stop_stream(VIDEO_ISP_IN);
-	ret = 0;
-	printf("finished\n");
-
-	close(fd_video_yuv);
-err_start_stream_video3:
-	stop_stream(VIDEO_RAW_CAPTURE);
-err_start_stream_video2:
-err_queue_buffers_video2:
-	free_buffers(VIDEO_ISP_IN);
-err_init_buffers_video3:
-	free_buffers(VIDEO_RAW_CAPTURE);
-err_init_buffers_video2:
-err_set_fmt_video3:
-err_set_fps:
-err_set_fmt_video2:
-	delete stitcher;
-	close(isp_in_fd);
-err_video3:
-	close(raw_capture_fd);
+cleanup_label:
+    cleanup();
 	return ret;
 }

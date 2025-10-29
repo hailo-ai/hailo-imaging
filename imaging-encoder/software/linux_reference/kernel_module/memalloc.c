@@ -1,21 +1,49 @@
 /*
  *  H2 Encoder device driver (kernel module)
- *  
+ *
+ *
+ *
  *  COPYRIGHT(C) 2014 VERISILICON
  *
- * This program is free software; you can redistribute it and/or 
- * modify it under the terms of the GNU General Public License 
- * as published by the Free Software Foundation; either version 2 
- * of the License, or (at your option) any later version. 
- * This program is distributed in the hope that it will be useful, 
- * but WITHOUT ANY WARRANTY; without even the implied warranty of 
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the 
- * GNU General Public License for more details. 
- * 
- * You should have received a copy of the GNU General Public License 
- * along with this program; if not, write to the Free Software 
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, 
- * USA. 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301,
+ * USA.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301,
+ * USA.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301,
+ * USA.
  */
 
 #include <asm/io.h>
@@ -31,53 +59,51 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/dma-mapping.h>
+#include <linux/cma.h>
+#include <linux/hashtable.h>
+#include <linux/hash.h>
+#include <linux/dma-mapping.h>
+#include <linux/cma.h>
+#include <linux/hashtable.h>
+#include <linux/hash.h>
+#include <linux/dma-mapping.h>
+#include <linux/cma.h>
+#include <linux/hashtable.h>
+#include <linux/hash.h>
 
 /* Our header */
 #include "hx280enc.h"
 
-#ifndef HLINA_START_ADDRESS
-#define HLINA_START_ADDRESS             0x02000000
-#endif
-
-#ifndef HLINA_SIZE
-#define HLINA_SIZE                      96
-#endif
-
-#ifndef HLINA_TRANSL_OFFSET
-#define HLINA_TRANSL_OFFSET             0x0
-#endif
-
-/* the size of chunk in MEMALLOC_DYNAMIC */
-#define CHUNK_SIZE                      (PAGE_SIZE * 4)
-
-/* memory size in MBs for MEMALLOC_DYNAMIC */
-unsigned int alloc_size = HLINA_SIZE;
-unsigned int alloc_base = HLINA_START_ADDRESS;
-
-/* user space SW will substract HLINA_TRANSL_OFFSET from the bus address
- * and decoder HW will use the result as the address translated base
- * address. The SW needs the original host memory bus address for memory
- * mapping to virtual address. */
-unsigned int addr_transl = HLINA_TRANSL_OFFSET;
-
-
-static DEFINE_SPINLOCK(mem_lock);
+#define MEM_ALIGN_SIZE (PAGE_SIZE * 4)
+#define MEM_HASHTABLE_BITS 8
 
 typedef struct hlinc {
-        u32 bus_address;
-        u16 chunks_reserved;
+        struct hlist_node node;
+        dma_addr_t bus_address;
+        void* virt_address;
+        u32 size;
         int owner_pid; /* Client that allocated this chunk */
 } hlina_chunk;
 
-static hlina_chunk *hlina_chunks = NULL;
-static size_t chunks = 0;
-static size_t remaining_chunks = 0;
+static DEFINE_MUTEX(mem_mutex);
+static struct device *memalloc_dev = NULL;
+/* memory size in MBs for MEMALLOC_DYNAMIC */
+static unsigned int max_alloc_size = 0;
+static unsigned int allocated_size = 0;
+
+static struct hlist_head hlina_chunks[1 << MEM_HASHTABLE_BITS];
 
 static int AllocMemory(unsigned *busaddr, unsigned int size);
 static int FreeMemory(unsigned long busaddr);
 static void ResetMems(void);
 
-long memalloc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+//chunks are allocated and freed by those functions
+static void cmem_free(hlina_chunk *chunk);
+static int cmem_alloc(u32 size, hlina_chunk **chunk_out);
+
+
+static long memalloc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
         int ret = 0;
         MemallocParams memparams;
@@ -102,35 +128,37 @@ long memalloc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
                 return -EFAULT;
 
         switch (cmd) {
-	case MEMALLOC_IOCGMEMBASE:
-		__put_user(alloc_base, (unsigned long *) arg);
-		break;
         case MEMALLOC_IOCHARDRESET:
-                spin_lock(&mem_lock);
+                mutex_lock(&mem_mutex);
                 ResetMems();
-                spin_unlock(&mem_lock);
+                mutex_unlock(&mem_mutex);
                 break;
         case MEMALLOC_IOCXGETBUFFER:
                 ret = copy_from_user(&memparams, (MemallocParams*)arg,
                                      sizeof(MemallocParams));
                 if(ret) {
-                        printk("MEMALLOC_IOCXGETBUFFER: failed to copy params from user\n");
+                        printk(KERN_ERR "MEMALLOC_IOCXGETBUFFER: failed to copy params from user\n");
+                        printk(KERN_ERR "MEMALLOC_IOCXGETBUFFER: failed to copy params from user\n");
+                        printk(KERN_ERR "MEMALLOC_IOCXGETBUFFER: failed to copy params from user\n");
                         break;
                 }
 
-                spin_lock(&mem_lock);
+                mutex_lock(&mem_mutex);
                 ret = AllocMemory(&memparams.busAddress, memparams.size);
-                spin_unlock(&mem_lock);
-                memparams.translationOffset = addr_transl;
+                mutex_unlock(&mem_mutex);
+                memparams.translationOffset = 0;
                 ret |= copy_to_user((MemallocParams*)arg, &memparams,
                                     sizeof(MemallocParams));
 
                 break;
         case MEMALLOC_IOCSFREEBUFFER:
-                __get_user(busaddr, (unsigned long *) arg);
-                spin_lock(&mem_lock);
+                if (get_user(busaddr, (unsigned long *) arg)) {
+                        printk(KERN_ERR "MEMALLOC_IOCSFREEBUFFER: failed to get busaddr from user\n");
+                        return -EFAULT;
+                }
+                mutex_lock(&mem_mutex);
                 ret = FreeMemory(busaddr);
-                spin_unlock(&mem_lock);
+                mutex_unlock(&mem_mutex);
                 break;
         }
 
@@ -140,188 +168,196 @@ long memalloc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 int memalloc_release(struct inode *inode, struct file *filp)
 {
-        int i = 0;
-
-        for(i = 0; i < chunks; i++) {
-                spin_lock(&mem_lock);
-                if(hlina_chunks[i].owner_pid != 0) {
-                        printk(KERN_WARNING "memalloc: Found unfreed memory at release time!\n");
-
-                        hlina_chunks[i].owner_pid = 0;
-                        hlina_chunks[i].chunks_reserved = 0;
-                }
-                spin_unlock(&mem_lock);
-        }
-        PDEBUG("memalloc_release: dev closed\n");
-        return 0;
+    ResetMems();
+    return 0;
 }
 
 void memalloc_cleanup(void)
 {
-        if(hlina_chunks != NULL)
-                vfree(hlina_chunks);
-
-        PDEBUG("module removed\n");
-        return;
+    memalloc_dev = NULL;
+    ResetMems();
 }
 
-
-
-int memalloc_init(unsigned int  _alloc_base, unsigned int _alloc_size)
+int memalloc_init(struct device *mem_dev, unsigned int max_alloc_sz)
 {
-       int result;
-		        
-        alloc_base = _alloc_base;
-        alloc_size = _alloc_size;
-		
-	printk("memalloc: Linear Memory Allocator\n");
-        printk("memalloc: Linear memory base = 0x%08x\n", alloc_base);
+    int ret;
+    unsigned int bus_addr;
+    unsigned int size = 16*1024*1024; // 16MB
+    u64 mask = dma_get_required_mask(mem_dev);
+    if(dma_set_mask_and_coherent(mem_dev,mask)) {
+        printk(KERN_ERR "memalloc: dma_set_mask(%lld) failed!!\n", mask);
+        return -EINVAL;
+    }
 
-        chunks = (alloc_size * 1024 * 1024) / CHUNK_SIZE;
-        remaining_chunks = chunks;
+    max_alloc_size = max_alloc_sz;
+    memalloc_dev = mem_dev;
+	printk(KERN_INFO "memalloc: CMEM Memory Allocator\n");
+    printk(KERN_INFO "memalloc: CMEM memory max size = 0x%08x\n", max_alloc_size);
 
-        printk(KERN_INFO "memalloc: Total size %u MB; %lu chunks"
-               " of size %lu\n", alloc_size, chunks, CHUNK_SIZE);
+    hash_init(hlina_chunks);
 
-        hlina_chunks = (hlina_chunk *) vmalloc(chunks * sizeof(hlina_chunk));
-        if (hlina_chunks == NULL) {
-                printk(KERN_ERR "memalloc: cannot allocate hlina_chunks\n");
-                result = -ENOMEM;
-                goto err;
-        }
+    ResetMems();
 
-        ResetMems();
+    ret = AllocMemory(&bus_addr, size);
+    if(ret != 0) {
+        printk(KERN_ERR "memalloc: Test Initialization FAILED\n");
+        return ret;
+    }
 
-        return 0;
-
-err:
-        if(hlina_chunks != NULL)
-                vfree(hlina_chunks);
-
-        return result;
+    FreeMemory(bus_addr);
+    return 0;
 }
 
-/* Cycle through the buffers we have, give the first free one */
+// static int memalloc_release(struct inode *inode, struct file *filp)
+// {
+//     ResetMems();
+//     return 0;
+// }
+
 static int AllocMemory(unsigned *busaddr, unsigned int size)
 {
+    int ret;
+    hlina_chunk *chunk;
+    ret = cmem_alloc(size, &chunk);
+    if(ret != 0) {
+        printk(KERN_ERR "%s: Allocation FAILED: size = %d\n", __func__, size);
+        return ret;
+    }
+    *busaddr = chunk->bus_address;
+    chunk->owner_pid = current->tgid;
+    hash_add(hlina_chunks, &chunk->node, hash_32(chunk->bus_address, MEM_HASHTABLE_BITS));
 
-        int i = 0;
-        int j = 0;
-        unsigned int skip_chunks = 0;
+    if(*busaddr == 0) {
+            kfree(chunk);
+            printk(KERN_ERR "%s: Allocation FAILED: size = %d\n", __func__, size);
+            ret = -EFAULT;
+    } else {
+            allocated_size += chunk->size;
+            printk(KERN_DEBUG "%s - after allocating %d bytes (effective %d) , total allocation is %d\n", __func__,
+                   size, chunk->size, allocated_size);
+    }
 
-        /* calculate how many chunks we need; round up to chunk boundary */
-        unsigned int alloc_chunks = (size + CHUNK_SIZE - 1) / CHUNK_SIZE;
-        int cur_pid = current->tgid;
-
-        *busaddr = 0;
-        if (alloc_chunks > remaining_chunks) {
-                printk(KERN_WARNING "%s - Trying to allocate %u chunks when there are only %lu remaining chunks\n",
-                __func__, alloc_chunks, remaining_chunks);
-                return -ENOMEM;
-        }
-
-        /* run through the chunk table */
-        for(i = 0; i < chunks;) {
-                skip_chunks = 0;
-                /* if this chunk is available */
-                if(!hlina_chunks[i].chunks_reserved) {
-                        /* check that there is enough memory left */
-                        if (i + alloc_chunks > chunks)
-                                break;
-
-                        /* check that there is enough consecutive chunks available */
-                        for (j = i; j < i + alloc_chunks; j++) {
-                                if (hlina_chunks[j].chunks_reserved) {
-                                        skip_chunks = 1;
-                                        /* skip the used chunks */
-                                        i = j + hlina_chunks[j].chunks_reserved;
-                                        break;
-                                }
-                        }
-
-                        /* if enough free memory found */
-                        if (!skip_chunks) {
-                                *busaddr = hlina_chunks[i].bus_address;
-                                hlina_chunks[i].owner_pid = cur_pid;
-                                hlina_chunks[i].chunks_reserved = alloc_chunks;
-                                break;
-                        }
-                } else {
-                        /* skip the used chunks */
-                        i += hlina_chunks[i].chunks_reserved;
-                }
-        }
-
-        if(*busaddr == 0) {
-                printk(KERN_ERR "memalloc: Allocation FAILED: size = %d\n", size);
-                return -EFAULT;
-        } else {
-                remaining_chunks -= alloc_chunks;
-                printk(KERN_DEBUG "%s - after allocating %u chunks for proc %d, we have %lu free chunks remaining\n",
-                __func__, alloc_chunks, cur_pid, remaining_chunks);
-        }
-
-        return 0;
+    return ret;
 }
 
 /* Free a buffer based on bus address */
-static int FreeMemory(unsigned long busaddr)
+static int FreeMemory(unsigned long bus_address)
 {
-        int i = 0;
-        int cur_pid = current->tgid;
+    int cur_pid = current->tgid;
 
-
-        for(i = 0; i < chunks; i++) {
-                /* user space SW has stored the translated bus address, add addr_transl to
-                 * translate back to our address space */
-                if(hlina_chunks[i].bus_address == busaddr + addr_transl) {
-                        if(hlina_chunks[i].owner_pid == cur_pid) {
-                                remaining_chunks += hlina_chunks[i].chunks_reserved;
-                                hlina_chunks[i].owner_pid = 0;
-                                hlina_chunks[i].chunks_reserved = 0;
-
-                        } else {
-                                printk(KERN_WARNING "memalloc: Owner mismatch while freeing memory!\n");
-                        }
-                        break;
-                }
+    hlina_chunk *tmp;
+    /* Search for the chunk with the given bus address */
+    hash_for_each_possible(hlina_chunks, tmp, node, hash_32(bus_address, MEM_HASHTABLE_BITS)) {
+        if(tmp->bus_address == bus_address && tmp->owner_pid == cur_pid) {
+            printk(KERN_DEBUG "%s - freeing chunk addr %llx of size %d for proc %d\n",
+                   __func__, (unsigned long long)tmp->virt_address, tmp->size, tmp->owner_pid);
+            hash_del(&tmp->node);
+            allocated_size -= tmp->size;
+            cmem_free(tmp);
+            return 0;
         }
-        return 0;
+    }
+
+    printk(KERN_ERR "%s: No address %lu or pid %d found while freeing memory!\n",
+            __func__, bus_address, cur_pid);
+
+    return -EINVAL;
 }
 
-/* Reset "used" status for all of proc buffers */
+/* Force release of all allocated cmem buffers for each pid.
+ * pid == 0 means all the buffers
+ */
+/* Force release of all allocated cmem buffers for each pid.
+ * pid == 0 means all the buffers
+ */
 static void ResetProcMems(const int cur_pid)
 {
-        int i = 0;
-
-        for(i = 0; i < chunks; i++) {
-            if(hlina_chunks[i].owner_pid == cur_pid) {
-                remaining_chunks += hlina_chunks[i].chunks_reserved;
-                hlina_chunks[i].owner_pid = 0;
-                hlina_chunks[i].chunks_reserved = 0;
-            }
+    unsigned int bkt;
+    hlina_chunk *tmp;
+    int total_leaked_chunks = 0;
+    hash_for_each(hlina_chunks, bkt, tmp, node) {
+        if(cur_pid == 0 || tmp->owner_pid == cur_pid) {
+            printk(KERN_DEBUG "%s - Freeing chunk of size %d for proc %d\n",
+                   __func__, tmp->size, tmp->owner_pid);
+            total_leaked_chunks += tmp->size;
+            hash_del(&tmp->node);
+            cmem_free(tmp);
         }
-        printk(KERN_DEBUG "%s - after releasing chunks of proc %d, we have %lu free chunks remaining\n",
-        __func__, cur_pid, remaining_chunks);
+    }
+
+    if(total_leaked_chunks > 0) {
+        printk(KERN_INFO "%s - Forced free of %d bytes for proc %d\n",
+               __func__, total_leaked_chunks, cur_pid);
+    }
+
+    allocated_size -= total_leaked_chunks;
+    if(allocated_size < 0) {
+        printk(KERN_ERR "%s - allocated_size is negative: %d\n", __func__, allocated_size);
+        allocated_size = 0;
+    }
 }
 
-/* Reset "used" status */
 static void ResetMems(void)
 {
-        int i = 0;
-        unsigned int ba = alloc_base;
-
-        for(i = 0; i < chunks; i++) {
-                hlina_chunks[i].bus_address = ba;
-                hlina_chunks[i].owner_pid = 0;
-                hlina_chunks[i].chunks_reserved = 0;
-
-                ba += CHUNK_SIZE;
-        }
+    ResetProcMems(0);
 }
 
-/* module description 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Verisilicon");
-MODULE_DESCRIPTION("H2 Encoder driver");
-*/
+static void cmem_free(hlina_chunk *chunk) {
+    if (chunk && chunk->virt_address) {
+        dma_free_coherent(memalloc_dev, chunk->size, chunk->virt_address, chunk->bus_address);
+        allocated_size -= chunk->size;
+        printk(KERN_DEBUG "%s: released %d bytes, total allocated size = %d max_allocate = %d\n", __func__,
+                chunk->size, allocated_size, max_alloc_size);
+        printk(KERN_DEBUG "%s: virt=0x%llx bus=0x%llx size=0x%x\n", __func__,
+                (unsigned long long)chunk->virt_address, (unsigned long long)chunk->bus_address, chunk->size);
+    } else {
+        printk(KERN_ERR "%s - chunk is NULL or invalid\n", __func__);
+    }
+
+    kfree(chunk);
+
+    if (allocated_size < 0) {
+        printk(KERN_ERR "%s - allocated_size is negative: %d\n", __func__, allocated_size);
+        allocated_size = 0;
+    }
+}
+
+static int cmem_alloc(u32 size, hlina_chunk **chunk_out)
+{
+    hlina_chunk *chunk;
+
+    size = ((size + MEM_ALIGN_SIZE - 1) / MEM_ALIGN_SIZE) * MEM_ALIGN_SIZE; // Align to MEM_ALIGN_SIZE
+
+    if(allocated_size + size > max_alloc_size) {
+            printk(KERN_ERR "memalloc: Allocation FAILED: total allocated size = %d exceeds max size = %d\n",
+                    allocated_size + size, max_alloc_size);
+            return -ENOMEM;
+    }
+
+    chunk = (hlina_chunk*)kzalloc(sizeof(*chunk), GFP_KERNEL);
+    if (!chunk) {
+            printk(KERN_ERR "cmem_alloc: Allocation FAILED: could not allocate chunk structure\n");
+            *chunk_out = NULL;
+            return -ENOMEM;
+    }
+
+    chunk->virt_address = dma_alloc_coherent(memalloc_dev, size, &chunk->bus_address,
+                                             GFP_KERNEL);
+    if (!chunk->virt_address) {
+            printk(KERN_ERR "cmem_alloc: Allocation FAILED: could not allocate contiguous %d bytes\n", size);
+            kfree(chunk);
+            *chunk_out = NULL;
+            return -ENOMEM;
+    }
+
+    allocated_size += size;
+    printk(KERN_DEBUG "%s: Allocated size %d, total allocated size = %d max_allocate = %d\n", __func__,
+           size, allocated_size, max_alloc_size);
+
+    printk(KERN_DEBUG "%s: virt=0x%llx bus=0x%lx size=0x%x\n", __func__,
+           (unsigned long long)chunk->virt_address, (unsigned long)chunk->bus_address, size);
+    chunk->size = size;
+    *chunk_out = chunk;
+
+    return 0;
+ }
