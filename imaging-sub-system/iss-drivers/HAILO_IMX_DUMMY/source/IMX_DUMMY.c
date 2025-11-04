@@ -344,6 +344,7 @@ static RESULT IMX_Dummy_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     result = HalAddRef(pConfig->HalHandle);
     if (result != RET_SUCCESS) {
         free(pIMXDummyCtx);
+        pIMXDummyCtx = NULL;
         return (result);
     }
 
@@ -416,6 +417,7 @@ static RESULT IMX_Dummy_IsiReleaseIss(IsiSensorHandle_t handle) {
     close(pIMXDummyCtx->i2c_fd);
     MEMSET(pIMXDummyCtx, 0, sizeof(IMX_dummy_Context_t));
     free(pIMXDummyCtx);
+    pIMXDummyCtx = NULL;
     return (result);
 }
 

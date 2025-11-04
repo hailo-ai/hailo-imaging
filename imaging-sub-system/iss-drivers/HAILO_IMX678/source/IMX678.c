@@ -395,6 +395,7 @@ static RESULT IMX678_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     result = HalAddRef(pConfig->HalHandle);
     if (result != RET_SUCCESS) {
         free(pIMX678Ctx);
+        pIMX678Ctx = NULL;
         return (result);
     }
 
@@ -416,6 +417,7 @@ static RESULT IMX678_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     if (result != RET_SUCCESS) {
         TRACE(IMX678_ERROR, "%s: Set sensor mode data failed! (%d)\n", __func__, result);
         free(pIMX678Ctx);
+        pIMX678Ctx = NULL;
         return result;
     }
 
@@ -478,6 +480,7 @@ static RESULT IMX678_IsiReleaseIss(IsiSensorHandle_t handle) {
     close(pIMX678Ctx->i2c_fd);
     MEMSET(pIMX678Ctx, 0, sizeof(IMX678_Context_t));
     free(pIMX678Ctx);
+    pIMX678Ctx = NULL;
     return (result);
 }
 

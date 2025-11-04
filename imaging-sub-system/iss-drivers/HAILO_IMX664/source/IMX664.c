@@ -346,6 +346,7 @@ static RESULT IMX664_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     result = HalAddRef(pConfig->HalHandle);
     if (result != RET_SUCCESS) {
         free(pIMX664Ctx);
+        pIMX664Ctx = NULL;
         return (result);
     }
 
@@ -363,6 +364,7 @@ static RESULT IMX664_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     if (result != RET_SUCCESS) {
         TRACE(IMX664_ERROR, "%s: Set sensor mode data failed! (%d)\n", __func__, result);
         free(pIMX664Ctx);
+        pIMX664Ctx = NULL;
         return result;
     }
 
@@ -418,6 +420,7 @@ static RESULT IMX664_IsiReleaseIss(IsiSensorHandle_t handle) {
     close(pIMX664Ctx->i2c_fd);
     MEMSET(pIMX664Ctx, 0, sizeof(IMX664_Context_t));
     free(pIMX664Ctx);
+    pIMX664Ctx = NULL;
     return (result);
 }
 

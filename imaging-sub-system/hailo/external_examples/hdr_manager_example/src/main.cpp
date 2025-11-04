@@ -219,6 +219,7 @@ static int init_buffers(int path, int num_planes)
 		if (!buf.m.planes) {
 			fprintf(stderr, "Error: Failed to allocate memory for planes in buffer %d on path %d\n", n_buffers[path], path);
 			free(buffers[path]);
+			buffers[path] = NULL;
 			return -ENOMEM;
 		}
 		memset(buf.m.planes, 0,
@@ -227,7 +228,9 @@ static int init_buffers(int path, int num_planes)
 		if (-1 == xioctl(path_to_fd(path), VIDIOC_QUERYBUF, &buf)) {
 			fprintf(stderr, "Error: VIDIOC_QUERYBUF failed for buffer %d on path %d\n", n_buffers[path], path);
 			free(buf.m.planes);
+			buffers[path] = NULL;
 			free(buffers[path]);
+			buffers[path] = NULL;
 			return errno;
 		}
 
@@ -245,7 +248,9 @@ static int init_buffers(int path, int num_planes)
 			if (MAP_FAILED == buffers[path][n_buffers[path]].planes[plane]) {
 				fprintf(stderr, "Error: mmap failed for buffer %d, plane %d on path %d\n", n_buffers[path], plane, path);
 				free(buf.m.planes);
+				buffers[path] = NULL;
 				free(buffers[path]);
+				buffers[path] = NULL;
 				return -ENOMEM;
 			}
 		}
@@ -257,6 +262,7 @@ static int init_buffers(int path, int num_planes)
 	if (MAP_FAILED == wb_buffer) {
 		fprintf(stderr, "Error: mmap failed for wb_buffer\n");
 		free(buffers[path]);
+		buffers[path] = NULL;
 		return -ENOMEM;
 	}
 	return 0;
@@ -268,6 +274,8 @@ static void free_buffers(int path)
 	unsigned int plane;
 	for (frame = 0; frame < n_buffers[path]; ++frame) {
 		free(buffers[path][frame].v4l2_buf.m.planes);
+		buffers[path][frame].v4l2_buf.m.planes = nullptr;
+
 		for (plane = 0; plane < buffers[path][frame].v4l2_buf.length; ++plane)
 			munmap(buffers[path][frame].planes[plane],
 			       buffers[path][frame].sizes[plane]);

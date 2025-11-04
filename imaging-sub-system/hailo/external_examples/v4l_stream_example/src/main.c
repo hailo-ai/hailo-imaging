@@ -518,12 +518,14 @@ static void free_buffers()
 	int plane;
 	for (frame = 0; frame < n_buffers; ++frame) {
 		free(buffers[frame].v4l2_buf.m.planes);
+		buffers[frame].v4l2_buf.m.planes = NULL;
 		for (plane = 0; plane < buffers[frame].v4l2_buf.length; ++plane)
 			munmap(buffers[frame].planes[plane],
 			       buffers[frame].sizes[plane]);
 	}
 
 	free(buffers);
+	buffers = NULL;
 }
 
 static int process_frame(int index, int video_fd, int out_fd, int vsm_fd)

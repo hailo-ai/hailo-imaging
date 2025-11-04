@@ -347,6 +347,7 @@ static RESULT IMX715_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     result = HalAddRef(pConfig->HalHandle);
     if (result != RET_SUCCESS) {
         free(pIMX715Ctx);
+        pIMX715Ctx = NULL;
         return (result);
     }
 
@@ -368,6 +369,7 @@ static RESULT IMX715_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     if (result != RET_SUCCESS) {
         TRACE(IMX715_ERROR, "%s: Set sensor mode data failed! (%d)\n", __func__, result);
         free(pIMX715Ctx);
+        pIMX715Ctx = NULL;
         return result;
     }
 
@@ -423,6 +425,7 @@ static RESULT IMX715_IsiReleaseIss(IsiSensorHandle_t handle) {
     close(pIMX715Ctx->i2c_fd);
     MEMSET(pIMX715Ctx, 0, sizeof(IMX715_Context_t));
     free(pIMX715Ctx);
+    pIMX715Ctx = NULL;
     return (result);
 }
 

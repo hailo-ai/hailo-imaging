@@ -95,7 +95,9 @@ static void releaseQExtCtrls(QExtCtrlsList_t *list_head) {
   if (list_head) {
     tmp = list_head->next;
     free(list_head->qExtCtrl);
+    list_head->qExtCtrl = NULL;
     free(list_head);
+    list_head = NULL;
     releaseQExtCtrls(tmp);
   }
 }
@@ -344,6 +346,7 @@ int main(int argc, char *argv[]) {
         new_wb_matrix[4], new_wb_matrix[5], new_wb_matrix[6], new_wb_matrix[7],
         new_wb_matrix[8]);
     free(new_wb_matrix);
+    new_wb_matrix = NULL;
   } else {
     printf("get isp_wb_cc_matrix returned NULL\n");
   }
@@ -402,6 +405,7 @@ int main(int argc, char *argv[]) {
         new_af_windows[6], new_af_windows[7], new_af_windows[8],
         new_af_windows[9], new_af_windows[10], new_af_windows[11]);
     free(new_af_windows);
+    new_af_windows = NULL;
   } else {
     printf("get isp_af_window returned NULL\n");
   }
@@ -432,6 +436,7 @@ int main(int argc, char *argv[]) {
     printf(
         "get isp_ae_iris_limits returned min %f, max %f\n", new_iris_limits[0]/100.0f, new_iris_limits[1]/100.0f);
     free(new_iris_limits);
+    new_iris_limits = NULL;
   } else {
     printf("get isp_ae_iris_limits returned NULL\n");
   }
@@ -455,6 +460,7 @@ int main(int argc, char *argv[]) {
         new_af_measure[0], new_af_measure[1], new_af_measure[2],
         new_af_measure[3], new_af_measure[4], new_af_measure[5]);
     free(new_af_measure);
+    new_af_measure = NULL;
   } else {
     printf("get isp_af_measurement returned NULL\n");
   }

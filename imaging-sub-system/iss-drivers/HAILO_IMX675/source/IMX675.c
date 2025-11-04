@@ -361,6 +361,7 @@ static RESULT IMX675_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     result = HalAddRef(pConfig->HalHandle);
     if (result != RET_SUCCESS) {
         free(pIMX675Ctx);
+        pIMX675Ctx = NULL;
         return (result);
     }
 
@@ -382,6 +383,7 @@ static RESULT IMX675_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     if (result != RET_SUCCESS) {
         TRACE(IMX675_ERROR, "%s: Set sensor mode data failed! (%d)\n", __func__, result);
         free(pIMX675Ctx);
+        pIMX675Ctx = NULL;
         return result;
     }
     
@@ -437,6 +439,7 @@ static RESULT IMX675_IsiReleaseIss(IsiSensorHandle_t handle) {
     close(pIMX675Ctx->i2c_fd);
     MEMSET(pIMX675Ctx, 0, sizeof(IMX675_Context_t));
     free(pIMX675Ctx);
+    pIMX675Ctx = NULL;
     return (result);
 }
 
