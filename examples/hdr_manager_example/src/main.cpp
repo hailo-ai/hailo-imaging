@@ -507,6 +507,8 @@ void updateWBGains(unsigned char* wbBuffer){
 		channels[channel] = ((float)channels_raw[channel]) / 256;
 		float channel_quant = channels[channel] / wb_compensation;
 		int channel_to_buffer = std::ceil(channel_quant);
+		// we need to limit the value to 127 because the NN-core will not accept values greater than 127
+		channel_to_buffer = std::min(channel_to_buffer, 127);
 		wbBuffer[channel] = channel_to_buffer;
 		wbBuffer[channel + 4] = channel_to_buffer;
 		wbBuffer[channel + 8] = channel_to_buffer;
