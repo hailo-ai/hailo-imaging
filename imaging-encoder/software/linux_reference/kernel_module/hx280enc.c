@@ -1047,6 +1047,8 @@ int ResetAsicHard(hx280enc_t * dev)
         return -EINVAL;
     }
 
+    disable_irq(hx280enc_data.irq);
+
     // disable clocks
     clk_disable_unprepare(dev->clk);
     clk_disable_unprepare(dev->hclk);
@@ -1070,6 +1072,9 @@ int ResetAsicHard(hx280enc_t * dev)
         clk_disable_unprepare(dev->hclk);
         return ret;
     }
+
+    enable_irq(hx280enc_data.irq);
+
     return ret;
 }
 
