@@ -256,22 +256,6 @@ static RESULT IMX678_IsiSetPowerIss(IsiSensorHandle_t handle, bool_t on)
     return (result);
 }
 
-static RESULT IMX678_SetCtrl(int sensor_fd, unsigned int ctrl_cid, uint32_t value) {
-    struct v4l2_control control;
-    memset(&control, 0, sizeof(control));
-    control.id = ctrl_cid;
-    control.value = value;
-    int ret = ioctl(sensor_fd, VIDIOC_S_CTRL, &control);
-
-    if (ret < 0) {
-        TRACE(IMX678_ERROR, "%s: ioctl failed with error %d (%s). ret= %d\n",
-            __func__, errno, strerror(errno), ret);
-        return RET_FAILURE;
-    }
-
-    return RET_SUCCESS;
-}
-
 static int IMX678_GetCtrl(int sensor_fd, unsigned int ctrl_cid)
 {
 	struct v4l2_control control;
@@ -348,35 +332,6 @@ static RESULT IMX678_SetSensorModeData(IMX678_Context_t* pIMX678Ctx, size_t inde
     return RET_SUCCESS;
 }
 
-static RESULT IMX678_SetCustomConfig(IMX678_Context_t* pIMX678Ctx, IsiSensorCustomConfig_t* pCustomConfig) {
-    RESULT result = RET_SUCCESS;
-    int sensor_fd = ((HalContext_t*)pIMX678Ctx->IsiCtx.HalHandle)->sensor_fd;
-
-    if (pIMX678Ctx == NULL) {
-        return RET_WRONG_HANDLE;
-    }
-    
-    if (pCustomConfig == NULL) {
-        return RET_NULL_POINTER;
-    }
-
-    // Always set the custom RHS1 value (even if it is 0, to indicate usage of default value)
-    result = IMX678_SetCtrl(sensor_fd, IMX678_CID_CUSTOM_RHS1, pCustomConfig->readoutTiming.sef1);
-    if (result != RET_SUCCESS) {
-        TRACE(IMX678_ERROR, "%s: Failed to set custom RHS1 value (%d)\n", __func__, pCustomConfig->readoutTiming.sef1);
-        return result;
-    }
-
-    // Custom RHS2 value is not supported in this driver at the moment
-    if (pCustomConfig->readoutTiming.sef2 != 0) {
-        TRACE(IMX678_ERROR, "%s: Unsupported custom RHS2 value (%d)\n", __func__, pCustomConfig->readoutTiming.sef2);
-        return RET_NOTSUPP;
-    }
-
-    
-    return RET_SUCCESS;
-}
-
 static RESULT IMX678_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     RESULT result = RET_SUCCESS;
     IMX678_Context_t* pIMX678Ctx;
@@ -395,6 +350,7 @@ static RESULT IMX678_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     result = HalAddRef(pConfig->HalHandle);
     if (result != RET_SUCCESS) {
         free(pIMX678Ctx);
+        pIMX678Ctx = NULL;
         return (result);
     }
 
@@ -416,6 +372,7 @@ static RESULT IMX678_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     if (result != RET_SUCCESS) {
         TRACE(IMX678_ERROR, "%s: Set sensor mode data failed! (%d)\n", __func__, result);
         free(pIMX678Ctx);
+        pIMX678Ctx = NULL;
         return result;
     }
 
@@ -456,13 +413,6 @@ static RESULT IMX678_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
         pIMX678Ctx->SensorMode.af_mode = ISI_SENSOR_AF_MODE_CDAF;
     }
 
-    // Set custom config if there is any
-    result = IMX678_SetCustomConfig(pIMX678Ctx, &pConfig->CustomConfig);
-    if (result != RET_SUCCESS) {
-        TRACE(IMX678_ERROR, "%s: Failed to set custom config (%d)\n", __func__, result);
-        return result;
-    }
-
     return (result);
 }
 
@@ -478,6 +428,7 @@ static RESULT IMX678_IsiReleaseIss(IsiSensorHandle_t handle) {
     close(pIMX678Ctx->i2c_fd);
     MEMSET(pIMX678Ctx, 0, sizeof(IMX678_Context_t));
     free(pIMX678Ctx);
+    pIMX678Ctx = NULL;
     return (result);
 }
 
@@ -949,7 +900,7 @@ static RESULT IMX678_IsiGetRevisionIss(IsiSensorHandle_t handle,
     return (result);
 }
 
-static RESULT IMX678_IsiSetStreamingIss(IsiSensorHandle_t handle, bool_t on) {
+static RESULT IMX678_IsiSetStreamingIss(IsiSensorHandle_t handle, bool_t is_on) {
     RESULT result = RET_SUCCESS;
     TRACE(IMX678_INFO, "%s (enter)\n", __func__);
 
@@ -957,7 +908,7 @@ static RESULT IMX678_IsiSetStreamingIss(IsiSensorHandle_t handle, bool_t on) {
     if (pIMX678Ctx == NULL) {
         return (RET_WRONG_HANDLE);
     }
-    pIMX678Ctx->Streaming = on;
+    pIMX678Ctx->Streaming = is_on;
 
     if (pIMX678Ctx->enableHdr)
         return result;
@@ -1064,6 +1015,7 @@ static inline uint32_t IMX678_getNewVmaxAntiFlicker(IMX678_Context_t *pIMX678Ctx
     }
 
     for (int i = 1; i < peaks; ++i) {
+        // VMAX = i / (peaks * one_line_exp_time) can be obtained by algebra: comparing fps = 1 / (vmax * one_line_exp_time) = peaks / i
         uint32_t candidateVmax = i / (peaks * pIMX678Ctx->one_line_exp_time);
         if (candidateVmax < pIMX678Ctx->SensorMode.size.height || candidateVmax < pIMX678Ctx->original_vmax)
             continue;
@@ -1206,11 +1158,14 @@ static RESULT IMX678_IsiGetIntegrationTimeLimitsIss(
     IsiSensorHandle_t handle, float* pMinIntegrationTime,
     float* pMaxIntegrationTime) {
     IMX678_Context_t* pIMX678Ctx = (IMX678_Context_t*)handle;
-    uint32_t vmax, fsc;
+    uint32_t fsc;
     size_t dol;
     float max_long_it, max_short_it;
     float min_long_it, min_short_it;
     RESULT result = RET_SUCCESS;
+    int vmax = -1;
+    int rhs1 = -1;
+    HalContext_t* pHalCtx = NULL;
 
     TRACE(IMX678_INFO, "%s: (enter). prev values: min: %f, max: %f\n", __func__, pIMX678Ctx->AecMinIntegrationTime, pIMX678Ctx->AecMaxIntegrationTime);
 
@@ -1226,21 +1181,28 @@ static RESULT IMX678_IsiGetIntegrationTimeLimitsIss(
     }
 
     if (!pIMX678Ctx->enableHdr) {
-    *pMinIntegrationTime = pIMX678Ctx->AecMinIntegrationTime;
-    *pMaxIntegrationTime = pIMX678Ctx->AecMaxIntegrationTime;
+        *pMinIntegrationTime = pIMX678Ctx->AecMinIntegrationTime;
+        *pMaxIntegrationTime = pIMX678Ctx->AecMaxIntegrationTime;
 
-        TRACE(IMX678_INFO, "%s: (exit - SDR) %f, %f\n", 
-    __func__, *pMinIntegrationTime, *pMaxIntegrationTime);
+            TRACE(IMX678_INFO, "%s: (exit - SDR) %f, %f\n", 
+        __func__, *pMinIntegrationTime, *pMaxIntegrationTime);
 
-        return RET_SUCCESS;
+            return RET_SUCCESS;
     }
 
-    result = IMX678_ReadVmax(handle, &vmax);
-    if (result != RET_SUCCESS) {
+    pHalCtx = (HalContext_t*)pIMX678Ctx->IsiCtx.HalHandle;
+    if (!pHalCtx) {
+        TRACE(IMX678_ERROR,
+              "%s: Invalid HAL handle (NULL pointer detected)\n", __func__);
+        return (RET_WRONG_HANDLE);
+    }
+
+    vmax = IMX678_GetCtrl(pHalCtx->sensor_fd, IMX678_CID_VMAX);
+    if (vmax < 0) {
         TRACE(IMX678_ERROR, "%s: Unable to read VMAX\n", __func__);
-        return result;
+        return RET_FAILURE;
     }
-    
+
     dol = IMX678_GetNumExposures(pIMX678Ctx);
     if (dol == 0) {
         TRACE(IMX678_ERROR, "%s: Unable to get number of exposures\n", __func__);
@@ -1249,11 +1211,12 @@ static RESULT IMX678_IsiGetIntegrationTimeLimitsIss(
     fsc = vmax * dol;
 
     if (pIMX678Ctx->cur_rhs1 == 0) {
-        result = IMX678_ReadRHS1(handle, &pIMX678Ctx->cur_rhs1);
-        if (result != RET_SUCCESS) {
+        rhs1 = IMX678_GetCtrl(pHalCtx->sensor_fd, IMX678_CID_RHS1);
+        if (rhs1 < 0) {
             TRACE(IMX678_ERROR, "%s: Unable to read RHS1\n", __func__);
-            return result;
+            return RET_FAILURE;
         }
+        pIMX678Ctx->cur_rhs1 = (uint32_t)rhs1;
     }
 
     if (pIMX678Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
@@ -2231,7 +2194,11 @@ RESULT IMX678_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
     IMX678_Context_t* pIMX678Ctx = (IMX678_Context_t*)handle;
     uint32_t current_vmax = 0;
     uint32_t requested_vmax = 0;
+    uint32_t requested_fsc = 0;
     uint32_t shr = 0;
+    size_t dol = IMX678_GetNumExposures(pIMX678Ctx);
+    uint32_t fsc = 0;
+    uint32_t min_shr0 = (dol == 1) ? IMX678_MIN_SHR : IMX678_2DOL_SHR0_RHS1_GAP + pIMX678Ctx->cur_rhs1;
     int exp = 0;
 
     TRACE(IMX678_DEBUG, "%s: set sensor flickerMode = %d\n", __func__, flickerMode);
@@ -2244,6 +2211,10 @@ RESULT IMX678_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
     }
     if (pIMX678Ctx->enableHdr && (pIMX678Ctx->SensorMode.stitching_mode != SENSOR_STITCHING_L_AND_S)) {
         return RET_SUCCESS;
+    }
+    if (dol == 0) {
+        TRACE(IMX678_ERROR, "%s: Invalid DOL value (%d)\n", __func__, (int)dol);
+        return RET_FAILURE;
     }
     if (flickerMode > ISI_AE_ANTIBANDING_MODE_AUTO) {
         TRACE(IMX678_INFO, "%s: Invalid flickerMode (%d), setting ISI_AE_ANTIBANDING_MODE_AUTO instead.\n", __func__, flickerMode);
@@ -2260,20 +2231,24 @@ RESULT IMX678_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
         pIMX678Ctx->original_vmax = current_vmax;
     }
 
+    fsc = current_vmax * dol;
+
     exp = pIMX678Ctx->AecCurIntegrationTimeLEF / pIMX678Ctx->one_line_exp_time;
-    shr = MAX((int)current_vmax - exp, IMX678_MIN_SHR);
+    shr = MAX((int)(fsc) - exp, min_shr0);
 
     if (current_vmax > pIMX678Ctx->original_vmax) {
-        current_vmax = MAX((int)current_vmax - (int)shr + IMX678_MIN_SHR, IMX678_MIN_SHR);
-        shr = MAX((int)current_vmax - exp, IMX678_MIN_SHR);
+        current_vmax = MAX((int)fsc - (int)shr + min_shr0, min_shr0);
+        fsc = current_vmax * dol;
+        shr = MAX((int)fsc - exp, min_shr0);
         pIMX678Ctx->unlimit_fps_vmax_changed = current_vmax > pIMX678Ctx->original_vmax && pIMX678Ctx->unlimit_fps;
     }
 
     requested_vmax = IMX678_getNewVmaxAntiFlicker(pIMX678Ctx, current_vmax);
     requested_vmax = MAX( MIN(requested_vmax, IMX678_VMAX_MAX), 1);
+    requested_fsc = requested_vmax * dol;
     
     if (current_vmax != requested_vmax) {
-        shr = MAX( (int)requested_vmax - (int)current_vmax + (int)shr , IMX678_MIN_SHR);
+        shr = MAX( (int)requested_fsc - (int)fsc + (int)shr, min_shr0);
         TRACE(IMX678_DEBUG, "%s - writing 0x%x to VMAX, writing 0x%x to SHR0\n", __func__, requested_vmax, shr);
         
         result |= IMX678_LockRegHold(handle);
@@ -2287,6 +2262,7 @@ RESULT IMX678_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
         }
     }
     
+    // these 2 are being used only in SDR
     pIMX678Ctx->MaxIntegrationLine = MAX( MIN(requested_vmax - IMX678_MIN_SHR, IMX678_VMAX_MAX - IMX678_MIN_SHR), 1);
     pIMX678Ctx->AecMaxIntegrationTime = pIMX678Ctx->one_line_exp_time * pIMX678Ctx->MaxIntegrationLine;
 
@@ -2506,6 +2482,27 @@ static RESULT IMX678_IsiSetHCGIss(IsiSensorHandle_t handle, bool hcg) {
     result = IMX678_IsiWriteRegIss(handle, 0x3030 , hcg);
     if (result == RET_SUCCESS) {
         pIMX678Ctx->hcg = hcg;
+    } else {
+        TRACE(IMX678_ERROR, "%s: Failed to write HCG register: %d\n", __func__, result);
+        return result;
+    }
+
+    if (pIMX678Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
+        result = IMX678_IsiWriteRegIss(handle, 0x3031 , hcg);
+        if (result != RET_SUCCESS) {
+            IMX678_IsiWriteRegIss(handle, 0x3030 , !hcg);
+            TRACE(IMX678_ERROR, "%s: Failed to write HCG SEF1 register: %d\n", __func__, result);
+            return result;
+        }
+    }
+    if (pIMX678Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
+        result = IMX678_IsiWriteRegIss(handle, 0x3032 , hcg);
+        if (result != RET_SUCCESS) {
+            IMX678_IsiWriteRegIss(handle, 0x3030 , !hcg);
+            IMX678_IsiWriteRegIss(handle, 0x3031 , !hcg);
+            TRACE(IMX678_ERROR, "%s: Failed to write HCG SEF2 register: %d\n", __func__, result);
+            return result;
+        }
     }
 
     TRACE(IMX678_INFO, "%s: (exit)\n", __func__);

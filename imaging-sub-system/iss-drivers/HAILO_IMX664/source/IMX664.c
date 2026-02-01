@@ -346,6 +346,7 @@ static RESULT IMX664_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     result = HalAddRef(pConfig->HalHandle);
     if (result != RET_SUCCESS) {
         free(pIMX664Ctx);
+        pIMX664Ctx = NULL;
         return (result);
     }
 
@@ -363,6 +364,7 @@ static RESULT IMX664_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     if (result != RET_SUCCESS) {
         TRACE(IMX664_ERROR, "%s: Set sensor mode data failed! (%d)\n", __func__, result);
         free(pIMX664Ctx);
+        pIMX664Ctx = NULL;
         return result;
     }
 
@@ -418,6 +420,7 @@ static RESULT IMX664_IsiReleaseIss(IsiSensorHandle_t handle) {
     close(pIMX664Ctx->i2c_fd);
     MEMSET(pIMX664Ctx, 0, sizeof(IMX664_Context_t));
     free(pIMX664Ctx);
+    pIMX664Ctx = NULL;
     return (result);
 }
 
@@ -887,7 +890,7 @@ static RESULT IMX664_IsiGetRevisionIss(IsiSensorHandle_t handle,
     return (result);
 }
 
-static RESULT IMX664_IsiSetStreamingIss(IsiSensorHandle_t handle, bool_t on) {
+static RESULT IMX664_IsiSetStreamingIss(IsiSensorHandle_t handle, bool_t is_on) {
     RESULT result = RET_SUCCESS;
     TRACE(IMX664_INFO, "%s (enter)\n", __func__);
 
@@ -895,7 +898,7 @@ static RESULT IMX664_IsiSetStreamingIss(IsiSensorHandle_t handle, bool_t on) {
     if (pIMX664Ctx == NULL) {
         return (RET_WRONG_HANDLE);
     }
-    pIMX664Ctx->Streaming = on;
+    pIMX664Ctx->Streaming = is_on;
 
     if (pIMX664Ctx->enableHdr)
         return result;
@@ -2280,7 +2283,11 @@ RESULT IMX664_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
     IMX664_Context_t* pIMX664Ctx = (IMX664_Context_t*)handle;
     uint32_t current_vmax = 0;
     uint32_t requested_vmax = 0;
+    uint32_t requested_fsc = 0;
     uint32_t shr = 0;
+    size_t dol = IMX664_GetNumExposures(pIMX664Ctx);
+    uint32_t fsc = 0;
+    uint32_t min_shr0 = (dol == 1) ? IMX664_MIN_SHR : IMX664_2DOL_SHR0_RHS1_GAP + pIMX664Ctx->cur_rhs1;
     int exp = 0;
 
     TRACE(IMX664_DEBUG, "%s: set sensor flickerMode = %d\n", __func__, flickerMode);
@@ -2293,6 +2300,10 @@ RESULT IMX664_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
     }
     if (pIMX664Ctx->enableHdr && (pIMX664Ctx->SensorMode.stitching_mode != SENSOR_STITCHING_L_AND_S)) {
         return RET_SUCCESS;
+    }
+    if (dol == 0) {
+        TRACE(IMX664_ERROR, "%s: Invalid DOL mode (DOL = 0)\n", __func__);
+        return RET_WRONG_CONFIG;
     }
     if (flickerMode > ISI_AE_ANTIBANDING_MODE_AUTO) {
         TRACE(IMX664_INFO, "%s: Invalid flickerMode (%d), setting ISI_AE_ANTIBANDING_MODE_AUTO instead.\n", __func__, flickerMode);
@@ -2309,20 +2320,24 @@ RESULT IMX664_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
         pIMX664Ctx->original_vmax = current_vmax;
     }
 
+    fsc = current_vmax * dol;
+
     exp = pIMX664Ctx->AecCurIntegrationTimeLEF / pIMX664Ctx->one_line_exp_time;
-    shr = MAX((int)current_vmax - exp, IMX664_MIN_SHR);
+    shr = MAX((int)(fsc) - exp, min_shr0);
 
     if (current_vmax > pIMX664Ctx->original_vmax) {
-        current_vmax = MAX((int)current_vmax - (int)shr + IMX664_MIN_SHR, IMX664_MIN_SHR);
-        shr = MAX((int)current_vmax - exp, IMX664_MIN_SHR);
+        current_vmax = MAX((int)fsc - (int)shr + min_shr0, min_shr0);
+        fsc = current_vmax * dol;
+        shr = MAX((int)fsc - exp, min_shr0);
         pIMX664Ctx->unlimit_fps_vmax_changed = current_vmax > pIMX664Ctx->original_vmax && pIMX664Ctx->unlimit_fps;
     }
 
     requested_vmax = IMX664_getNewVmaxAntiFlicker(pIMX664Ctx, current_vmax);
     requested_vmax = MAX( MIN(requested_vmax, IMX664_VMAX_MAX), 1);
+    requested_fsc = requested_vmax * dol;
     
     if (current_vmax != requested_vmax) {
-        shr = MAX( (int)requested_vmax - (int)current_vmax + (int)shr , IMX664_MIN_SHR);
+        shr = MAX( (int)requested_fsc - (int)fsc + (int)shr, min_shr0);
         TRACE(IMX664_DEBUG, "%s - writing 0x%x to VMAX, writing 0x%x to SHR0\n", __func__, requested_vmax, shr);
         
         result |= IMX664_LockRegHold(handle);
@@ -2336,6 +2351,7 @@ RESULT IMX664_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
         }
     }
     
+    // these 2 are being used only in SDR
     pIMX664Ctx->MaxIntegrationLine = MAX( MIN(requested_vmax - IMX664_MIN_SHR, IMX664_VMAX_MAX - IMX664_MIN_SHR), 1);
     pIMX664Ctx->AecMaxIntegrationTime = pIMX664Ctx->one_line_exp_time * pIMX664Ctx->MaxIntegrationLine;
 
@@ -2555,6 +2571,27 @@ static RESULT IMX664_IsiSetHCGIss(IsiSensorHandle_t handle, bool hcg) {
     result = IMX664_IsiWriteRegIss(handle, 0x3030 , hcg);
     if (result == RET_SUCCESS) {
         pIMX664Ctx->hcg = hcg;
+    } else {
+        TRACE(IMX664_ERROR, "%s: Failed to write HCG register: %d\n", __func__, result);
+        return result;
+    }
+
+    if (pIMX664Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
+        result = IMX664_IsiWriteRegIss(handle, 0x3031 , hcg);
+        if (result != RET_SUCCESS) {
+            IMX664_IsiWriteRegIss(handle, 0x3030 , !hcg);
+            TRACE(IMX664_ERROR, "%s: Failed to write HCG SEF1 register: %d\n", __func__, result);
+            return result;
+        }
+    }
+    if (pIMX664Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
+        result = IMX664_IsiWriteRegIss(handle, 0x3032 , hcg);
+        if (result != RET_SUCCESS) {
+            IMX664_IsiWriteRegIss(handle, 0x3030 , !hcg);
+            IMX664_IsiWriteRegIss(handle, 0x3031 , !hcg);
+            TRACE(IMX664_ERROR, "%s: Failed to write HCG SEF2 register: %d\n", __func__, result);
+            return result;
+        }
     }
 
     TRACE(IMX664_INFO, "%s: (exit)\n", __func__);

@@ -25,8 +25,8 @@
 /* needed for __init,__exit directives */
 #include <linux/init.h>
 /* needed for remap_page_range
-	SetPageReserved
-	ClearPageReserved
+    SetPageReserved
+    ClearPageReserved
 */
 #include <linux/mm.h>
 /* obviously, for kmalloc */
@@ -147,7 +147,7 @@ typedef struct
     unsigned int mem_size;
     struct device*       dma_dev;
     struct cdev cdev;
-	dev_t devt;
+    dev_t devt;
     struct clk *hclk;
     struct clk *clk;
     struct class *class;
@@ -230,14 +230,16 @@ unsigned int WaitEncReady(hx280enc_t *dev)
    if(!wait_event_timeout(enc_wait_queue, CheckEncIrq(dev),
       msecs_to_jiffies(HX280ENC_IRQ_TIMEOUT_MSEC)))
    {
-	   pr_err("%s - wait_event_timeout timed out\n", __func__);
-	   return -ETIMEDOUT;
+       pr_err("%s - wait_event_timeout timed out\n", __func__);
+       return -ETIMEDOUT;
    }
 
    //pr_info("wait_event_interruptible DONE\n");
 
     return 0;
 }
+
+
 static long hx280enc_ioctl(struct file *filp,
                           unsigned int cmd, unsigned long arg)
 {
@@ -380,7 +382,7 @@ static long hx280enc_ioctl(struct file *filp,
 
 static int _hx280enc_get_proc_refcount_node(int pid, struct hx280enc_h_node **refcount_node) {
     struct hx280enc_h_node *curr;
-    hash_for_each_possible(hx280enc_data.proc_refcount, curr, node, hash_64(pid, HX280ENC_HASH_BITS)) {
+    hash_for_each_possible(hx280enc_data.proc_refcount, curr, node, pid) {
         if(curr->pid == pid){
             *refcount_node = curr;
             return 0;
@@ -410,7 +412,7 @@ static int hx280enc_open(struct inode *inode, struct file *filp)
         }
         refcount_node->refcount = 1;
         refcount_node->pid = cur_pid;
-        hash_add(hx280enc_data.proc_refcount, &refcount_node->node, hash_64(cur_pid, HX280ENC_HASH_BITS));
+        hash_add(hx280enc_data.proc_refcount, &refcount_node->node, cur_pid);
     }
     else {
         refcount_node->refcount++;
@@ -436,10 +438,10 @@ static int hx280enc_release(struct inode *inode, struct file *filp)
 
     refcount_node->refcount--;
     if(refcount_node->refcount == 0) {
-        ResetProcMems(cur_pid);
         _hx280enc_release_all_dmabufs(cur_pid);
         hash_del(&refcount_node->node);
         kfree(refcount_node);
+        ResetProcMems(cur_pid);
     }
     mutex_unlock(&hx280enc_data.mlock);
 
@@ -520,7 +522,7 @@ static long hx280enc_virt_to_phys(unsigned long virt, unsigned long size, phys_a
 
 static int _hx280enc_get_dmabuf_node(int fd, struct hx280enc_dmabuf_node **dmabuf_node) {
     struct hx280enc_dmabuf_node *curr;
-    hash_for_each_possible(hx280enc_data.shared_dmabufs, curr, node, hash_64(fd, HX280ENC_HASH_BITS)) {
+    hash_for_each_possible(hx280enc_data.shared_dmabufs, curr, node, fd) {
         if (curr->fd == fd) {
             *dmabuf_node = curr;
             return 0;
@@ -531,10 +533,11 @@ static int _hx280enc_get_dmabuf_node(int fd, struct hx280enc_dmabuf_node **dmabu
 
 static int _hx280enc_release_all_dmabufs(int tgid) {
     struct hx280enc_dmabuf_node *curr;
+    struct hlist_node *n;
     int fd;
     int ret;
     mutex_lock(&hx280enc_data.mlock_shared_dmabufs);
-    hash_for_each(hx280enc_data.shared_dmabufs, fd, curr, node) {
+    hash_for_each_safe(hx280enc_data.shared_dmabufs, fd, n, curr, node) {
         if (curr->tgid == tgid) {
             ret = hx280enc_unshare_dmabuf(curr->fd);
             if(ret) {
@@ -555,17 +558,18 @@ static int hx280enc_share_dmabuf(int fd, unsigned long *o_paddr)
     struct hx280enc_dmabuf_node *dmabuf_node;
     int ret = 0;
 
+    if (fd < 0) {
+        pr_err("Invalid fd (%d)\n", fd);
+        ret = -EINVAL;
+        goto out;
+    }
+
     ret = _hx280enc_get_dmabuf_node(fd, &dmabuf_node);
     if (!ret) {
         pr_err("dmabuf for fd %d already shared\n", fd);
         return -EINVAL;
     }
 
-    if (fd < 0) {
-        pr_err("Invalid fd (%d)\n", fd);
-        ret = -EINVAL;
-        goto out;
-    }
     // Get a reference to the dma_buf object
     dmabuf = dma_buf_get(fd);
     if (IS_ERR(dmabuf)) {
@@ -609,7 +613,7 @@ static int hx280enc_share_dmabuf(int fd, unsigned long *o_paddr)
     dmabuf_node->sgt = sgt;
     dmabuf_node->tgid = current->tgid;
     mutex_lock(&hx280enc_data.mlock_shared_dmabufs);
-    hash_add(hx280enc_data.shared_dmabufs, &dmabuf_node->node, hash_64(fd, HX280ENC_HASH_BITS));
+    hash_add(hx280enc_data.shared_dmabufs, &dmabuf_node->node, fd);
     mutex_unlock(&hx280enc_data.mlock_shared_dmabufs);
     *o_paddr = paddr;
     return 0;
@@ -677,22 +681,22 @@ static long hx280enc_pfn_virt_to_phys(struct vm_area_struct *vma, unsigned long 
 }
 
 static int hx280enc_mmap(struct file *filp,
-				   struct vm_area_struct *vma)
+                   struct vm_area_struct *vma)
 {
 
-	return remap_pfn_range(vma, vma->vm_start,
+    return remap_pfn_range(vma, vma->vm_start,
                     vma->vm_pgoff, vma->vm_end - vma->vm_start, pgprot_writecombine(vma->vm_page_prot));
                     //vma->vm_pgoff, vma->vm_end - vma->vm_start, pgprot_noncached(vma->vm_page_prot));
                     //vma->vm_pgoff, vma->vm_end - vma->vm_start, vma->vm_page_prot);
 }
 /* VFS methods */
 static struct file_operations hx280enc_fops = {
-	.owner= THIS_MODULE,
-	.open = hx280enc_open,
-	.release = hx280enc_release,
-	.unlocked_ioctl = hx280enc_ioctl,
+    .owner= THIS_MODULE,
+    .open = hx280enc_open,
+    .release = hx280enc_release,
+    .unlocked_ioctl = hx280enc_ioctl,
     .mmap = hx280enc_mmap,
-	.fasync = NULL,
+    .fasync = NULL,
 };
 
 //int __init hx280enc_init(void)
@@ -704,10 +708,10 @@ static int vc8000e_probe(struct platform_device *pdev)
     int ret;
 
     if (pdev->id >= ENCODER_DEVICE_MAXCNT)
-	{
-		pr_err("%s:pdev id is %d error\n", __func__,pdev->id);
-		return  -EINVAL;
-	}
+    {
+        pr_err("%s:pdev id is %d error\n", __func__,pdev->id);
+        return  -EINVAL;
+    }
 
     hx280enc_data.hclk = devm_clk_get(dev, "hclk");
     if (IS_ERR(hx280enc_data.hclk)) {
@@ -719,9 +723,9 @@ static int vc8000e_probe(struct platform_device *pdev)
         return dev_err_probe(dev, PTR_ERR(hx280enc_data.clk), "unable to get clk\n");
     }
 
-	pm_runtime_get_sync(dev);
-	pm_runtime_set_active(dev);
-	pm_runtime_enable(dev);
+    pm_runtime_get_sync(dev);
+    pm_runtime_set_active(dev);
+    pm_runtime_enable(dev);
 
     ret = clk_prepare_enable(hx280enc_data.hclk);
     if (ret) {
@@ -737,8 +741,8 @@ static int vc8000e_probe(struct platform_device *pdev)
     }
 
     irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
-		return irq;
+    if (irq < 0)
+        return irq;
 
     h265_reset = devm_reset_control_get(dev,"h265-rst");
     if (IS_ERR(h265_reset)) {
@@ -763,7 +767,7 @@ static int vc8000e_probe(struct platform_device *pdev)
     hx280enc_data.h265_rst = h265_reset;
 
     if (devise_register_index == 0)
-	{
+    {
         ret = alloc_chrdev_region(&hx280enc_data.devt, 0, ENCODER_DEVICE_MAXCNT, ENCODER_DEVICE_NAME);
         if (ret != 0)
         {
@@ -789,26 +793,26 @@ static int vc8000e_probe(struct platform_device *pdev)
 
     hx280enc_data.devt = MKDEV(hx280enc_major, hx280enc_minor + pdev->id);
     cdev_init(&hx280enc_data.cdev, &hx280enc_fops);
-	ret = cdev_add(&hx280enc_data.cdev, hx280enc_data.devt, 1);
-	if ( ret )
-	{
-		pr_err("%s[%d]:cdev_add error!\n", __func__, __LINE__);
-		return ret;
-	}
-	hx280enc_data.class = hx280enc_class;
-	device_create(hx280enc_data.class, NULL, hx280enc_data.devt,
-			&hx280enc_data, "%s", ENCODER_DEVICE_NAME);
+    ret = cdev_add(&hx280enc_data.cdev, hx280enc_data.devt, 1);
+    if ( ret )
+    {
+        pr_err("%s[%d]:cdev_add error!\n", __func__, __LINE__);
+        return ret;
+    }
+    hx280enc_data.class = hx280enc_class;
+    device_create(hx280enc_data.class, NULL, hx280enc_data.devt,
+            &hx280enc_data, "%s", ENCODER_DEVICE_NAME);
 
     devise_register_index++;
 
 #if 0
     result = register_chrdev(hx280enc_major, "hx280enc", &hx280enc_fops);
-	if (result < 0) {
-		pr_err("hx280enc: unable to get major <%d>\n",
-		hx280enc_major);
-		return result;
-	} else if (result != 0) /* this is for dynamic major */
-		hx280enc_major = result;
+    if (result < 0) {
+        pr_err("hx280enc: unable to get major <%d>\n",
+        hx280enc_major);
+        return result;
+    } else if (result != 0) /* this is for dynamic major */
+        hx280enc_major = result;
 #endif
 
     result = ReserveIO();
@@ -833,7 +837,7 @@ static int vc8000e_probe(struct platform_device *pdev)
                              "hx280enc", (void *) &hx280enc_data);
       */
         result = devm_request_irq(&pdev->dev, irq, hx280enc_isr,
-				       IRQF_SHARED, "hx280enc", (void *) &hx280enc_data);
+                       IRQF_SHARED, "hx280enc", (void *) &hx280enc_data);
 
         if(result == -EINVAL)
         {
@@ -862,12 +866,12 @@ static int vc8000e_probe(struct platform_device *pdev)
   err:
     //unregister_chrdev(hx280enc_major, "hx280enc");
     cdev_del(&hx280enc_data.cdev);
-	device_destroy(hx280enc_data.class, hx280enc_data.devt);
-	unregister_chrdev_region(hx280enc_data.devt, ENCODER_DEVICE_MAXCNT);
-	if (devise_register_index == 0)
-	{
-		class_destroy(hx280enc_data.class);
-	}
+    device_destroy(hx280enc_data.class, hx280enc_data.devt);
+    unregister_chrdev_region(hx280enc_data.devt, ENCODER_DEVICE_MAXCNT);
+    if (devise_register_index == 0)
+    {
+        class_destroy(hx280enc_data.class);
+    }
     printk(KERN_INFO "hx280enc: module not inserted\n");
     return result;
 }
@@ -893,26 +897,27 @@ static int vc8000e_remove(struct platform_device *pdev)
     clk_disable_unprepare(hx280enc_data.clk);
     clk_disable_unprepare(hx280enc_data.hclk);
 
-	pm_runtime_put_sync(&pdev->dev);
-	pm_runtime_set_suspended(&pdev->dev);
-	pm_runtime_disable(&pdev->dev);
+    pm_runtime_put_sync(&pdev->dev);
+    pm_runtime_set_suspended(&pdev->dev);
+    pm_runtime_disable(&pdev->dev);
 
     hash_for_each(hx280enc_data.proc_refcount, bkt, tmp, node) {
         pr_info("%s - deleting hash table node\n", __func__);
+        ResetProcMems(tmp->pid);
         hash_del(&tmp->node);
     }
+
+    ResetProcMems(0); //checks for unfreed memory
     mutex_destroy(&hx280enc_data.mlock);
 
     cdev_del(&hx280enc_data.cdev);
-	device_destroy(hx280enc_data.class, hx280enc_data.devt);
-	unregister_chrdev_region(hx280enc_data.devt, ENCODER_DEVICE_MAXCNT);
-	if (devise_register_index == 0)
-	{
-		class_destroy(hx280enc_data.class);
-	}
+    device_destroy(hx280enc_data.class, hx280enc_data.devt);
+    unregister_chrdev_region(hx280enc_data.devt, ENCODER_DEVICE_MAXCNT);
+    if (devise_register_index == 0)
+    {
+        class_destroy(hx280enc_data.class);
+    }
     //unregister_chrdev(hx280enc_major, "hx280enc");
-
-    memalloc_cleanup();
 
     printk(KERN_INFO "hx280enc: module removed\n");
     return 0;
@@ -981,7 +986,7 @@ irqreturn_t hx280enc_isr(int irq, void *dev_id)
 #endif
 {
     unsigned int handled = 0;
-    hx280enc_t *dev = (hx280enc_t *) dev_id;
+    hx280enc_t *dev = (hx280enc_t *)dev_id;
     u32 irq_status;
     u32 hwId;
     u32 majorId;
@@ -1095,18 +1100,18 @@ void dump_regs(unsigned long data)
 
 
 static const struct of_device_id vc8000e_of_match[] = {
-	{ .compatible = "vivante,vc8000e" },
-	{ /* Sentinel */ }
+    { .compatible = "vivante,vc8000e" },
+    { /* Sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, vc8000e_of_match);
 
 static struct platform_driver vc8000e_platform_driver = {
-	.driver = {
-		.name		= "vc8000e",
-		.of_match_table	= vc8000e_of_match,
-	},
-	.probe			= vc8000e_probe,
-	.remove			= vc8000e_remove,
+    .driver = {
+        .name		= "vc8000e",
+        .of_match_table	= vc8000e_of_match,
+    },
+    .probe			= vc8000e_probe,
+    .remove			= vc8000e_remove,
 };
 
 module_platform_driver(vc8000e_platform_driver);

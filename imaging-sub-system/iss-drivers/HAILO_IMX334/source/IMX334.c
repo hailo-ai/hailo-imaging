@@ -127,6 +127,7 @@ static RESULT IMX334_IsiCreateIss(IsiSensorInstanceConfig_t *pConfig) {
     result = HalAddRef(pConfig->HalHandle);
     if (result != RET_SUCCESS) {
         free(pIMX334Ctx);
+        pIMX334Ctx = NULL;
         return (result);
     }
 
@@ -191,6 +192,7 @@ static RESULT IMX334_IsiReleaseIss(IsiSensorHandle_t handle) {
     close(pIMX334Ctx->i2c_fd);
     MEMSET(pIMX334Ctx, 0, sizeof(IMX334_Context_t));
     free(pIMX334Ctx);
+    pIMX334Ctx = NULL;
     return (result);
 }
 
@@ -586,13 +588,13 @@ static RESULT IMX334_IsiGetRevisionIss(IsiSensorHandle_t handle,
     return (result);
 }
 
-static RESULT IMX334_IsiSetStreamingIss(IsiSensorHandle_t handle, bool_t on) {
+static RESULT IMX334_IsiSetStreamingIss(IsiSensorHandle_t handle, bool_t is_on) {
     RESULT result = RET_SUCCESS;
     TRACE(IMX334_INFO, "%s (enter)\n", __func__);
 
     IMX334_Context_t *pIMX334Ctx = (IMX334_Context_t *)handle;
 
-    pIMX334Ctx->Streaming = on;
+    pIMX334Ctx->Streaming = is_on;
 
     TRACE(IMX334_INFO, "%s (exit)\n", __func__);
     return (result);
@@ -1233,6 +1235,8 @@ RESULT IMX334_IsiSetFpsIss(IsiSensorHandle_t handle, uint32_t Fps) {
     return (result);
 }
 
+// TODO: when (and if) this sensor driver supports HDR,
+// we should update this function to support HDR as well.
 RESULT IMX334_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode) {
     RESULT result = RET_SUCCESS;
     IMX334_Context_t* pIMX334Ctx = (IMX334_Context_t*)handle;

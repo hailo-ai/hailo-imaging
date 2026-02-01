@@ -94,6 +94,7 @@ CREATE_TRACER(IMX_DUMMY_REG_DEBUG, "IMX_DUMMY: ", INFO, 1)
 #define DEFAULT_RHS1_2DOL 0xa3
 #define MICRO_2_NANO 1000
 #define IMX_DUMMY_2DOL_NUM_EXP 2
+#define IMX_DUMMY_3DOL_NUM_EXP 3
 
 FlickerModePeaksPerSec flickerPeaksPerSecMap[] = {
     { ISI_AE_ANTIBANDING_MODE_OFF, 0 },
@@ -344,6 +345,7 @@ static RESULT IMX_Dummy_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     result = HalAddRef(pConfig->HalHandle);
     if (result != RET_SUCCESS) {
         free(pIMXDummyCtx);
+        pIMXDummyCtx = NULL;
         return (result);
     }
 
@@ -416,6 +418,7 @@ static RESULT IMX_Dummy_IsiReleaseIss(IsiSensorHandle_t handle) {
     close(pIMXDummyCtx->i2c_fd);
     MEMSET(pIMXDummyCtx, 0, sizeof(IMX_dummy_Context_t));
     free(pIMXDummyCtx);
+    pIMXDummyCtx = NULL;
     return (result);
 }
 
@@ -819,7 +822,7 @@ static RESULT IMX_Dummy_IsiGetRevisionIss(IsiSensorHandle_t handle,
     return (result);
 }
 
-static RESULT IMX_Dummy_IsiSetStreamingIss(IsiSensorHandle_t handle, bool_t on) {
+static RESULT IMX_Dummy_IsiSetStreamingIss(IsiSensorHandle_t handle, bool_t is_on) {
     RESULT result = RET_SUCCESS;
     TRACE(IMX_DUMMY_INFO, "%s (enter)\n", __func__);
 
@@ -827,7 +830,7 @@ static RESULT IMX_Dummy_IsiSetStreamingIss(IsiSensorHandle_t handle, bool_t on) 
     if (pIMXDummyCtx == NULL) {
         return (RET_WRONG_HANDLE);
     }
-    pIMXDummyCtx->Streaming = on;
+    pIMXDummyCtx->Streaming = is_on;
 
     if (pIMXDummyCtx->enableHdr)
         return result;
@@ -859,6 +862,50 @@ static RESULT IMX_Dummy_IsiGetGainLimitsIss(IsiSensorHandle_t handle,
 
     TRACE(IMX_DUMMY_INFO, "%s: (exit)\n", __func__);
     return (result);
+}
+
+static size_t IMX_Dummy_GetNumExposures(IMX_dummy_Context_t* pIMXDummyCtx) {
+    if (pIMXDummyCtx == NULL) {
+        return 0;
+    }
+
+    if (pIMXDummyCtx->SensorMode.hdr_mode == SENSOR_MODE_LINEAR) {
+        return 1; // SDR
+    } else if (pIMXDummyCtx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
+        return IMX_DUMMY_2DOL_NUM_EXP;
+    } else if (pIMXDummyCtx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
+        return IMX_DUMMY_3DOL_NUM_EXP;
+    } else {
+        TRACE(IMX_DUMMY_ERROR, "%s: Unsupported HDR mode %d with stitching mode %d\n",
+            __func__, pIMXDummyCtx->SensorMode.hdr_mode, pIMXDummyCtx->SensorMode.stitching_mode);
+        return 0;
+    }
+}
+
+static RESULT IMX_Dummy_UpdateCurrLEFIntegrationTimeFromFsc(IMX_dummy_Context_t* pIMXDummyCtx, uint32_t fsc, uint32_t shr0) {
+    if (pIMXDummyCtx == NULL) {
+        return RET_NULL_POINTER;
+    }
+
+    float configuredIntegrationTime = (fsc - shr0) * pIMXDummyCtx->one_line_exp_time;
+
+    pIMXDummyCtx->OldIntegrationTime = configuredIntegrationTime;
+    pIMXDummyCtx->AecCurIntegrationTimeLEF = configuredIntegrationTime;
+
+    TRACE(IMX_DUMMY_DEBUG, "%s: Updated LEF Integration Time = (fsc[%u] - shr0[%u]) * one_line_exp_time[%f] = %f\n",
+          __func__, fsc, shr0, pIMXDummyCtx->one_line_exp_time, configuredIntegrationTime);
+    return RET_SUCCESS;
+}
+
+static RESULT IMX_Dummy_UpdateCurrLEFIntegrationTimeFromVmax(IMX_dummy_Context_t* pIMXDummyCtx, uint32_t vmax, uint32_t shr0) {
+    if (pIMXDummyCtx == NULL) {
+        return RET_NULL_POINTER;
+    }
+
+    size_t dol = IMX_Dummy_GetNumExposures(pIMXDummyCtx);
+    uint32_t fsc = vmax * dol;
+    TRACE(IMX_DUMMY_DEBUG, "%s: fsc = vmax[%u] * dol[%zu] = %u\n", __func__, vmax, dol, fsc);
+    return IMX_Dummy_UpdateCurrLEFIntegrationTimeFromFsc(pIMXDummyCtx, fsc, shr0);
 }
 
 static inline int IMX_Dummy_getFlickerPeaksPerSec(IsiSensorAntibandingMode_t mode) {
@@ -2155,7 +2202,11 @@ RESULT IMX_Dummy_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerM
     IMX_dummy_Context_t* pIMXDummyCtx = (IMX_dummy_Context_t*)handle;
     uint32_t current_vmax = 0;
     uint32_t requested_vmax = 0;
+    uint32_t requested_fsc = 0;
     uint32_t shr = 0;
+    size_t dol = IMX_Dummy_GetNumExposures(pIMXDummyCtx);
+    uint32_t fsc = 0;
+    uint32_t min_shr0 = (dol == 1) ? IMX_DUMMY_MIN_SHR : IMX_DUMMY_2DOL_SHR0_RHS1_GAP + pIMXDummyCtx->cur_rhs1;
     int exp = 0;
 
     TRACE(IMX_DUMMY_DEBUG, "%s: set sensor flickerMode = %d\n", __func__, flickerMode);
@@ -2184,36 +2235,38 @@ RESULT IMX_Dummy_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerM
         pIMXDummyCtx->original_vmax = current_vmax;
     }
 
+    fsc = current_vmax * dol;
+
     exp = pIMXDummyCtx->AecCurIntegrationTimeLEF / pIMXDummyCtx->one_line_exp_time;
-    shr = MAX((int)current_vmax - exp, IMX_DUMMY_MIN_SHR);
+    shr = MAX((int)(fsc) - exp, min_shr0);
 
     if (current_vmax > pIMXDummyCtx->original_vmax) {
-        current_vmax = MAX((int)current_vmax - (int)shr + IMX_DUMMY_MIN_SHR, IMX_DUMMY_MIN_SHR);
-        shr = MAX((int)current_vmax - exp, IMX_DUMMY_MIN_SHR);
+        current_vmax = MAX((int)fsc - (int)shr + min_shr0, min_shr0);
+        fsc = current_vmax * dol;
+        shr = MAX((int)fsc - exp, min_shr0);
         pIMXDummyCtx->unlimit_fps_vmax_changed = current_vmax > pIMXDummyCtx->original_vmax && pIMXDummyCtx->unlimit_fps;
     }
 
     requested_vmax = IMX_Dummy_getNewVmaxAntiFlicker(pIMXDummyCtx, current_vmax);
     requested_vmax = MAX( MIN(requested_vmax, IMX_DUMMY_VMAX_MAX), 1);
+    requested_fsc = requested_vmax * dol;
     
     if (current_vmax != requested_vmax) {
-        shr = MAX( (int)requested_vmax - (int)current_vmax + (int)shr , IMX_DUMMY_MIN_SHR);
+        shr = MAX( (int)requested_fsc - (int)fsc + (int)shr, min_shr0);
+        TRACE(IMX_DUMMY_DEBUG, "%s - writing 0x%x to VMAX, writing 0x%x to SHR0\n", __func__, requested_vmax, shr);
+        
         result |= IMX_Dummy_LockRegHold(handle);
         result |= IMX_Dummy_WriteVmax(handle, requested_vmax);
         result |= IMX_Dummy_WriteShr0(handle, shr);
         result |= IMX_Dummy_UnlockRegHold(handle);
+        result |= IMX_Dummy_UpdateCurrLEFIntegrationTimeFromVmax(pIMXDummyCtx, requested_vmax, shr);
         if (result != RET_SUCCESS) {
             TRACE(IMX_DUMMY_ERROR, "%s: Unable to write VMAX or Shr0\n", __func__);
             return (result);
         }
-        TRACE(IMX_DUMMY_DEBUG, "%s - writing 0x%x to VMAX, writing 0x%x to SHR0\n", __func__, requested_vmax, shr);
-
-        float configuredIntegrationTime = (requested_vmax - shr) * pIMXDummyCtx->one_line_exp_time;
-        pIMXDummyCtx->OldIntegrationTime = configuredIntegrationTime;
-        pIMXDummyCtx->AecCurIntegrationTimeLEF = configuredIntegrationTime;
-        TRACE(IMX_DUMMY_DEBUG, "%s: Ti=%f\n", __func__, configuredIntegrationTime);
     }
     
+    // these 2 are being used only in SDR
     pIMXDummyCtx->MaxIntegrationLine = MAX( MIN(requested_vmax - IMX_DUMMY_MIN_SHR, IMX_DUMMY_VMAX_MAX - IMX_DUMMY_MIN_SHR), 1);
     pIMXDummyCtx->AecMaxIntegrationTime = pIMXDummyCtx->one_line_exp_time * pIMXDummyCtx->MaxIntegrationLine;
 

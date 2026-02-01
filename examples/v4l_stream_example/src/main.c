@@ -82,17 +82,27 @@ static const struct fmt hdr_fmts[] = { { // TODO: make sure all of those are sup
 			      .num_planes = 1,
 		      },
 		      {
-			      .name = "raw_rggb12p",
+			      .name = "raw_rggb12p_3dol",
 			      .pix_fmt = V4L2_PIX_FMT_SRGGB12P,
 			      .num_planes = 3,
 		      },
 			  {
-			      .name = "raw_rggb12",
+			      .name = "raw_rggb12_3dol",
 			      .pix_fmt = V4L2_PIX_FMT_SRGGB12,
 			      .num_planes = 3,
 			  },
 			  {
-			      .name = "raw_gbrg12",
+			      .name = "raw_rggb12p_2dol",
+			      .pix_fmt = V4L2_PIX_FMT_SRGGB12P,
+			      .num_planes = 2,
+		      },
+			  {
+			      .name = "raw_rggb12_2dol",
+			      .pix_fmt = V4L2_PIX_FMT_SRGGB12,
+			      .num_planes = 2,
+		      },
+			  {
+			      .name = "raw_gbrg12_2dol",
 			      .pix_fmt = V4L2_PIX_FMT_SGBRG12,
 			      .num_planes = 2,
 		      } };
@@ -154,7 +164,7 @@ struct __args {
 		.name = "format",
 		.type = STR,
 		.data.s = "nv12",
-		.help = "format of output frame. currently supported: nv12, rgb, yuy2, raw_rggb12p, raw_rggb12, raw_gbrg12",
+		.help = "format of output frame. SDR formats: nv12, rgb, yuy2, raw_rggb12p, raw_rggb12, raw_gbrg12. HDR formats: nv12, rgb, yuy2, raw_rggb12p_3dol (3 planes), raw_rggb12_3dol (3 planes), raw_rggb12p_2dol (2 planes), raw_rggb12_2dol (2 planes), raw_gbrg12_2dol (2 planes)",
 	},
 	{
 		.name = "device",
@@ -518,12 +528,14 @@ static void free_buffers()
 	int plane;
 	for (frame = 0; frame < n_buffers; ++frame) {
 		free(buffers[frame].v4l2_buf.m.planes);
+		buffers[frame].v4l2_buf.m.planes = NULL;
 		for (plane = 0; plane < buffers[frame].v4l2_buf.length; ++plane)
 			munmap(buffers[frame].planes[plane],
 			       buffers[frame].sizes[plane]);
 	}
 
 	free(buffers);
+	buffers = NULL;
 }
 
 static int process_frame(int index, int video_fd, int out_fd, int vsm_fd)

@@ -165,24 +165,8 @@ static long memalloc_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
         return ret ? -EFAULT: 0;
 }
 
-
-int memalloc_release(struct inode *inode, struct file *filp)
-{
-    ResetMems();
-    return 0;
-}
-
-void memalloc_cleanup(void)
-{
-    memalloc_dev = NULL;
-    ResetMems();
-}
-
 int memalloc_init(struct device *mem_dev, unsigned int max_alloc_sz)
 {
-    int ret;
-    unsigned int bus_addr;
-    unsigned int size = 16*1024*1024; // 16MB
     u64 mask = dma_get_required_mask(mem_dev);
     if(dma_set_mask_and_coherent(mem_dev,mask)) {
         printk(KERN_ERR "memalloc: dma_set_mask(%lld) failed!!\n", mask);
@@ -198,21 +182,8 @@ int memalloc_init(struct device *mem_dev, unsigned int max_alloc_sz)
 
     ResetMems();
 
-    ret = AllocMemory(&bus_addr, size);
-    if(ret != 0) {
-        printk(KERN_ERR "memalloc: Test Initialization FAILED\n");
-        return ret;
-    }
-
-    FreeMemory(bus_addr);
     return 0;
 }
-
-// static int memalloc_release(struct inode *inode, struct file *filp)
-// {
-//     ResetMems();
-//     return 0;
-// }
 
 static int AllocMemory(unsigned *busaddr, unsigned int size)
 {
@@ -225,7 +196,7 @@ static int AllocMemory(unsigned *busaddr, unsigned int size)
     }
     *busaddr = chunk->bus_address;
     chunk->owner_pid = current->tgid;
-    hash_add(hlina_chunks, &chunk->node, hash_32(chunk->bus_address, MEM_HASHTABLE_BITS));
+    hash_add(hlina_chunks, &chunk->node, chunk->bus_address);
 
     if(*busaddr == 0) {
             kfree(chunk);
@@ -233,8 +204,6 @@ static int AllocMemory(unsigned *busaddr, unsigned int size)
             ret = -EFAULT;
     } else {
             allocated_size += chunk->size;
-            printk(KERN_DEBUG "%s - after allocating %d bytes (effective %d) , total allocation is %d\n", __func__,
-                   size, chunk->size, allocated_size);
     }
 
     return ret;
@@ -247,10 +216,8 @@ static int FreeMemory(unsigned long bus_address)
 
     hlina_chunk *tmp;
     /* Search for the chunk with the given bus address */
-    hash_for_each_possible(hlina_chunks, tmp, node, hash_32(bus_address, MEM_HASHTABLE_BITS)) {
+    hash_for_each_possible(hlina_chunks, tmp, node, bus_address) {
         if(tmp->bus_address == bus_address && tmp->owner_pid == cur_pid) {
-            printk(KERN_DEBUG "%s - freeing chunk addr %llx of size %d for proc %d\n",
-                   __func__, (unsigned long long)tmp->virt_address, tmp->size, tmp->owner_pid);
             hash_del(&tmp->node);
             allocated_size -= tmp->size;
             cmem_free(tmp);
@@ -274,23 +241,29 @@ static void ResetProcMems(const int cur_pid)
 {
     unsigned int bkt;
     hlina_chunk *tmp;
+	struct hlist_node *n;
     int total_leaked_chunks = 0;
-    hash_for_each(hlina_chunks, bkt, tmp, node) {
+    mutex_lock(&mem_mutex);
+    hash_for_each_safe(hlina_chunks, bkt, n, tmp, node) {
         if(cur_pid == 0 || tmp->owner_pid == cur_pid) {
-            printk(KERN_DEBUG "%s - Freeing chunk of size %d for proc %d\n",
-                   __func__, tmp->size, tmp->owner_pid);
-            total_leaked_chunks += tmp->size;
+			allocated_size -= tmp->size;
+			if(cur_pid == 0)
+			{
+				printk(KERN_INFO "%s - Forced free of chunk of size %d for proc %d\n",
+					__func__, tmp->size, tmp->owner_pid);
+            	total_leaked_chunks += tmp->size;
+			}
             hash_del(&tmp->node);
             cmem_free(tmp);
         }
     }
+	mutex_unlock(&mem_mutex);
 
     if(total_leaked_chunks > 0) {
-        printk(KERN_INFO "%s - Forced free of %d bytes for proc %d\n",
-               __func__, total_leaked_chunks, cur_pid);
-    }
+        printk(KERN_WARNING "%s - Forced free of %d bytes\n", __func__, total_leaked_chunks);
+    	allocated_size -= total_leaked_chunks;
+	}
 
-    allocated_size -= total_leaked_chunks;
     if(allocated_size < 0) {
         printk(KERN_ERR "%s - allocated_size is negative: %d\n", __func__, allocated_size);
         allocated_size = 0;
@@ -306,15 +279,11 @@ static void cmem_free(hlina_chunk *chunk) {
     if (chunk && chunk->virt_address) {
         dma_free_coherent(memalloc_dev, chunk->size, chunk->virt_address, chunk->bus_address);
         allocated_size -= chunk->size;
-        printk(KERN_DEBUG "%s: released %d bytes, total allocated size = %d max_allocate = %d\n", __func__,
-                chunk->size, allocated_size, max_alloc_size);
-        printk(KERN_DEBUG "%s: virt=0x%llx bus=0x%llx size=0x%x\n", __func__,
-                (unsigned long long)chunk->virt_address, (unsigned long long)chunk->bus_address, chunk->size);
     } else {
         printk(KERN_ERR "%s - chunk is NULL or invalid\n", __func__);
     }
 
-    kfree(chunk);
+    kfree(chunk); //It's safe to kfree a NULL pointer
 
     if (allocated_size < 0) {
         printk(KERN_ERR "%s - allocated_size is negative: %d\n", __func__, allocated_size);
@@ -329,7 +298,7 @@ static int cmem_alloc(u32 size, hlina_chunk **chunk_out)
     size = ((size + MEM_ALIGN_SIZE - 1) / MEM_ALIGN_SIZE) * MEM_ALIGN_SIZE; // Align to MEM_ALIGN_SIZE
 
     if(allocated_size + size > max_alloc_size) {
-            printk(KERN_ERR "memalloc: Allocation FAILED: total allocated size = %d exceeds max size = %d\n",
+            printk(KERN_ERR "cmem_alloc: Allocation FAILED: total allocated size = %d exceeds max size = %d\n",
                     allocated_size + size, max_alloc_size);
             return -ENOMEM;
     }
@@ -351,11 +320,6 @@ static int cmem_alloc(u32 size, hlina_chunk **chunk_out)
     }
 
     allocated_size += size;
-    printk(KERN_DEBUG "%s: Allocated size %d, total allocated size = %d max_allocate = %d\n", __func__,
-           size, allocated_size, max_alloc_size);
-
-    printk(KERN_DEBUG "%s: virt=0x%llx bus=0x%lx size=0x%x\n", __func__,
-           (unsigned long long)chunk->virt_address, (unsigned long)chunk->bus_address, size);
     chunk->size = size;
     *chunk_out = chunk;
 
