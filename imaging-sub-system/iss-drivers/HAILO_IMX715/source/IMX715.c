@@ -47,6 +47,8 @@ CREATE_TRACER(IMX715_DEBUG, "IMX715: ", INFO, 1)
 CREATE_TRACER(IMX715_REG_INFO, "IMX715: ", INFO, 1)
 CREATE_TRACER(IMX715_REG_DEBUG, "IMX715: ", INFO, 1)
 
+#define LOG_ERROR(...) TRACE(IMX715_ERROR, __VA_ARGS__)
+
 #include <fcntl.h>
 #include <linux/v4l2-subdev.h>
 #include <linux/videodev2.h>
@@ -90,6 +92,8 @@ CREATE_TRACER(IMX715_REG_DEBUG, "IMX715: ", INFO, 1)
 #define MICRO_2_NANO 1000
 #define IMX715_2DOL_NUM_EXP 2
 #define IMX715_3DOL_NUM_EXP 3
+/* When required long EV is within this many lines of max_long_it, use unity gain to avoid quantization noise. */
+#define IMX715_2DOL_MAX_IT_NEAR_LINES 2
 
 #define IMX715_RES_4K_HEIGHT 2160
 #define IMX715_RES_4K_WIDTH 3840
@@ -254,7 +258,7 @@ static RESULT IMX715_IsiSetPowerIss(IsiSensorHandle_t handle, bool_t on)
     return (result);
 }
 
-static int IMX715_GetCtrl(int sensor_fd, unsigned int ctrl_cid)
+static RESULT IMX715_GetCtrl(int sensor_fd, unsigned int ctrl_cid, int32_t *value)
 {
 	struct v4l2_control control;
 	memset(&control, 0, sizeof(control));
@@ -262,12 +266,13 @@ static int IMX715_GetCtrl(int sensor_fd, unsigned int ctrl_cid)
 
 	int ret = ioctl(sensor_fd, VIDIOC_G_CTRL, &control);
 	if (ret < 0) {
-		TRACE(IMX715_ERROR, "%s: ioctl failed with error %d (%s). ret= %d\n",
+		TRACE(IMX715_ERROR, "%s: VIDIOC_G_CTRL ioctl failed with error %d (%s). ret = %d\n",
 			__func__, errno, strerror(errno), ret);
-		return -1;
+		return RET_FAILURE;
 	}
 
-	return control.value;
+	*value = control.value;
+	return RET_SUCCESS;
 }
 
 static uint32_t IMX715_CalculateModeMaxIntegrationTime(
@@ -279,18 +284,18 @@ static uint32_t IMX715_CalculateModeMaxIntegrationTime(
             IMX715_3DOL_SHR1_RHS1_GAP : IMX715_2DOL_SHR1_RHS1_GAP;
         return rhs1 - rhs1_gap; // HDR
 	}
-
-	TRACE(IMX715_ERROR, "%s: Unsupported HDR mode %d\n", __func__, hdr_mode);
-	return 0;
 }
 
 static RESULT IMX715_SetSensorModeData(IMX715_Context_t* pIMX715Ctx, size_t index) {
-    int sensor_fd = ((HalContext_t*)pIMX715Ctx->IsiCtx.HalHandle)->sensor_fd;
-    uint32_t rhs1 = 0;
+    RESULT result = RET_SUCCESS;
+    int sensor_fd = 0;
+    int32_t rhs1 = 0;
 
     if (pIMX715Ctx == NULL) {
         return (RET_WRONG_HANDLE);
     }
+
+    sensor_fd = ((HalContext_t*)pIMX715Ctx->IsiCtx.HalHandle)->sensor_fd;
 
     if (index >= ARRAY_SIZE(pimx715_mode_info)) {
         return RET_OUTOFRANGE;
@@ -308,11 +313,11 @@ static RESULT IMX715_SetSensorModeData(IMX715_Context_t* pIMX715Ctx, size_t inde
     if (pIMX715Ctx->SensorMode.hdr_mode != SENSOR_MODE_LINEAR) {
         /* Get the RHS1 value via a control rather then reading the register,
          * because the register is not available until a stream is running. */
-        rhs1 = IMX715_GetCtrl(sensor_fd, IMX715_CID_RHS1);
-        if (rhs1 == 0 || rhs1 == -1) {
-            TRACE(IMX715_ERROR, "%s: Failed to get RHS1 value from sensor (%d)\n",
-                __func__, rhs1);
-            return RET_FAILURE;
+        result = IMX715_GetCtrl(sensor_fd, IMX715_CID_RHS1, &rhs1);
+        if ((result != RET_SUCCESS) || rhs1 == 0) {
+            TRACE(IMX715_ERROR, "%s: Failed to get RHS1 value from sensor (result=%d)\n",
+                __func__, result);
+            return result;
         }
     }
 
@@ -347,11 +352,13 @@ static RESULT IMX715_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     }
 
     MEMSET(pIMX715Ctx, 0, sizeof(IMX715_Context_t));
+    pIMX715Ctx->i2c_fd = -1;
+    pIMX715Ctx->i2c_af_fd = -1;
+
     result = HalAddRef(pConfig->HalHandle);
     if (result != RET_SUCCESS) {
-        free(pIMX715Ctx);
-        pIMX715Ctx = NULL;
-        return (result);
+        TRACE(IMX715_ERROR, "%s: HalAddRef failed, result=%d\n", __func__, result);
+        goto error_free_ctx;
     }
 
     pIMX715Ctx->IsiCtx.HalHandle = pConfig->HalHandle;
@@ -371,9 +378,7 @@ static RESULT IMX715_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     result = IMX715_SetSensorModeData(pIMX715Ctx, pConfig->SensorModeIndex);
     if (result != RET_SUCCESS) {
         TRACE(IMX715_ERROR, "%s: Set sensor mode data failed! (%d)\n", __func__, result);
-        free(pIMX715Ctx);
-        pIMX715Ctx = NULL;
-        return result;
+        goto error_hal_del_ref;
     }
 
     pConfig->hSensor = (IsiSensorHandle_t)pIMX715Ctx;
@@ -389,14 +394,15 @@ static RESULT IMX715_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     sprintf(i2c_file_path, "/dev/i2c-%d", pConfig->I2cBusNum);
     pIMX715Ctx->i2c_fd = open(i2c_file_path, O_RDWR);
     if (pIMX715Ctx->i2c_fd < 0) {
-        TRACE(IMX715_INFO, "unable to open /dev/i2c-%d\n", pConfig->I2cBusNum);
-        return RET_FAILURE;
+        TRACE(IMX715_ERROR, "%s: unable to open /dev/i2c-%d, errno=%d (%s)\n",
+              __func__, pConfig->I2cBusNum, errno, strerror(errno));
+        goto error_hal_del_ref;
     }
 
     if (ioctl(pIMX715Ctx->i2c_fd, I2C_SLAVE_FORCE, pIMX715Ctx->i2c_addr) < 0) {
-        TRACE(IMX715_INFO, "unable to set I2C_SLAVE_FORCE on /dev/i2c-%d\n",
-              pConfig->I2cBusNum);
-        return RET_FAILURE;
+        TRACE(IMX715_ERROR, "%s: unable to set I2C_SLAVE_FORCE on /dev/i2c-%d, errno=%d (%s)\n",
+              __func__, pConfig->I2cBusNum, errno, strerror(errno));
+        goto error_close_i2c_fd;
     }
 
     if (pConfig->I2cAfBusNum < 0) {
@@ -406,14 +412,23 @@ static RESULT IMX715_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
         sprintf(i2c_file_path, "/dev/i2c-%d", pConfig->I2cAfBusNum);
         pIMX715Ctx->i2c_af_fd = open(i2c_file_path, O_RDWR);
         if (pIMX715Ctx->i2c_af_fd < 0) {
-            TRACE(IMX715_INFO, "unable to open /dev/i2c-%d\n",
-                  pConfig->I2cAfBusNum);
-            return RET_FAILURE;
+            TRACE(IMX715_ERROR, "%s: unable to open /dev/i2c-%d for AF, errno=%d (%s)\n",
+                  __func__, pConfig->I2cAfBusNum, errno, strerror(errno));
+            goto error_close_i2c_fd;
         }
         pIMX715Ctx->SensorMode.af_mode = ISI_SENSOR_AF_MODE_CDAF;
     }
 
     return (result);
+
+error_close_i2c_fd:
+    close(pIMX715Ctx->i2c_fd);
+error_hal_del_ref:
+    (void)HalDelRef(pConfig->HalHandle);
+error_free_ctx:
+    free(pIMX715Ctx);
+    pIMX715Ctx = NULL;
+    return RET_FAILURE;
 }
 
 static RESULT IMX715_IsiReleaseIss(IsiSensorHandle_t handle) {
@@ -422,9 +437,14 @@ static RESULT IMX715_IsiReleaseIss(IsiSensorHandle_t handle) {
 
     if (pIMX715Ctx == NULL) return (RET_WRONG_HANDLE);
 
-    (void)IMX715_IsiSetStreamingIss(pIMX715Ctx, BOOL_FALSE);
-    (void)IMX715_IsiSetPowerIss(pIMX715Ctx, BOOL_FALSE);
+    result = IMX715_IsiSetStreamingIss(pIMX715Ctx, BOOL_FALSE);
+    CHECK_RESULT_RET(result, "SetStreaming off");
+    result = IMX715_IsiSetPowerIss(pIMX715Ctx, BOOL_FALSE);
+    CHECK_RESULT_RET(result, "SetPower off");
     (void)HalDelRef(pIMX715Ctx->IsiCtx.HalHandle);
+    if (pIMX715Ctx->i2c_af_fd >= 0) {
+        close(pIMX715Ctx->i2c_af_fd);
+    }
     close(pIMX715Ctx->i2c_fd);
     MEMSET(pIMX715Ctx, 0, sizeof(IMX715_Context_t));
     free(pIMX715Ctx);
@@ -459,6 +479,8 @@ static RESULT IMX715_IsiReadRegIss(IsiSensorHandle_t handle,
     ioctl_data.nmsgs = 2;
 
     if (ioctl(pIMX715Ctx->i2c_fd, I2C_RDWR, &ioctl_data) < 0) {
+        TRACE(IMX715_ERROR, "%s: ioctl I2C_RDWR failed, errno=%d (%s)\n",
+              __func__, errno, strerror(errno));
         return RET_FAILURE;
     }
 
@@ -471,6 +493,7 @@ static RESULT IMX715_IsiWriteRegIss(IsiSensorHandle_t handle,
                                     const uint32_t Addr, const uint32_t Value) {
     RESULT result = RET_SUCCESS;
     char out[IMX715_TRANSFER_BUFFER_LENGTH];
+    ssize_t write_ret;
 
     IMX715_Context_t* pIMX715Ctx = (IMX715_Context_t*)handle;
     if (pIMX715Ctx == NULL) {
@@ -481,15 +504,28 @@ static RESULT IMX715_IsiWriteRegIss(IsiSensorHandle_t handle,
     out[0] = (Addr >> 8) & 0xff;
     out[1] = Addr & 0xff;
     out[2] = Value;
-    if (write(pIMX715Ctx->i2c_fd, out, sizeof(out)) != sizeof(out))
+    write_ret = write(pIMX715Ctx->i2c_fd, out, sizeof(out));
+    if (write_ret != sizeof(out)) {
+        if (write_ret < 0) {
+            TRACE(IMX715_ERROR, "%s: I2C write failed with error %d (%s)\n",
+                  __func__, errno, strerror(errno));
+        } else {
+            TRACE(IMX715_ERROR, "%s: I2C write incomplete. Wrote %zd of %zu bytes\n",
+                  __func__, write_ret, sizeof(out));
+        }
         result = RET_FAILURE;
+    }
     return (result);
 }
 
 static RESULT IMX715_UpdateFps(IMX715_Context_t *pIMX715Ctx, uint32_t vmax) {
     float frame_time = 0;
     frame_time = (vmax * pIMX715Ctx->one_line_exp_time);
-    if (frame_time == 0) return RET_FAILURE;
+    if (frame_time == 0) {
+        TRACE(IMX715_ERROR, "%s: frame_time is 0, vmax=%u, one_line_exp_time=%f\n",
+              __func__, vmax, pIMX715Ctx->one_line_exp_time);
+        return RET_FAILURE;
+    }
 
     pIMX715Ctx->CurrFps = (uint32_t)(ceil(1 / frame_time)) * ISI_FPS_ACCURACY;
     return RET_SUCCESS;
@@ -500,12 +536,14 @@ static RESULT IMX715_ReadVmax(IsiSensorHandle_t handle, uint32_t* vmax) {
     RESULT result;
 
     result = IMX715_IsiReadRegIss(handle, 0x3024, &vmax_low);
-    result |= IMX715_IsiReadRegIss(handle, 0x3025, &vmax_mid);
-    result |= IMX715_IsiReadRegIss(handle, 0x3026, &vmax_high);
-    if (result) return RET_FAILURE;
+    CHECK_RESULT_RET(result, "ReadVmax low");
+    result = IMX715_IsiReadRegIss(handle, 0x3025, &vmax_mid);
+    CHECK_RESULT_RET(result, "ReadVmax mid");
+    result = IMX715_IsiReadRegIss(handle, 0x3026, &vmax_high);
+    CHECK_RESULT_RET(result, "ReadVmax high");
 
     *vmax = (vmax_high << 16) | (vmax_mid << 8) | vmax_low;
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_ReadHmax(IsiSensorHandle_t handle, uint32_t* hmax) {
@@ -513,22 +551,25 @@ static RESULT IMX715_ReadHmax(IsiSensorHandle_t handle, uint32_t* hmax) {
     RESULT result;
 
     result = IMX715_IsiReadRegIss(handle, 0x3028, &hmax_low);
-    result |= IMX715_IsiReadRegIss(handle, 0x3029, &hmax_high);
-    if (result) return RET_FAILURE;
+    CHECK_RESULT_RET(result, "ReadHmax low");
+    result = IMX715_IsiReadRegIss(handle, 0x3029, &hmax_high);
+    CHECK_RESULT_RET(result, "ReadHmax high");
 
     *hmax = (hmax_high << 8) | hmax_low;
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_WriteVmax(IsiSensorHandle_t handle, uint32_t vmax) {
     RESULT result;
     result = IMX715_IsiWriteRegIss(handle, 0x3024, vmax & 0xff);
-    result |= IMX715_IsiWriteRegIss(handle, 0x3025, (vmax >> 8) & 0xff);
-    result |= IMX715_IsiWriteRegIss(handle, 0x3026, (vmax >> 16) & 0x0f);
-    if (!result) {
-        return IMX715_UpdateFps((IMX715_Context_t *)handle, vmax);
-    }
+    CHECK_RESULT_RET(result, "WriteVmax low");
+    result = IMX715_IsiWriteRegIss(handle, 0x3025, (vmax >> 8) & 0xff);
+    CHECK_RESULT_RET(result, "WriteVmax mid");
+    result = IMX715_IsiWriteRegIss(handle, 0x3026, (vmax >> 16) & 0x0f);
+    CHECK_RESULT_RET(result, "WriteVmax high");
 
+    result = IMX715_UpdateFps((IMX715_Context_t *)handle, vmax);
+    CHECK_RESULT_RET(result, "UpdateFps");
     return result;
 }
 
@@ -537,12 +578,14 @@ static RESULT IMX715_ReadRHS1(IsiSensorHandle_t handle, uint32_t* rhs1) {
     RESULT result;
 
     result = IMX715_IsiReadRegIss(handle, 0x3060, &rhs1_low);
-    result |= IMX715_IsiReadRegIss(handle, 0x3061, &rhs1_mid);
-    result |= IMX715_IsiReadRegIss(handle, 0x3062, &rhs1_high);
-    if (result) return RET_FAILURE;
+    CHECK_RESULT_RET(result, "ReadRHS1 low");
+    result = IMX715_IsiReadRegIss(handle, 0x3061, &rhs1_mid);
+    CHECK_RESULT_RET(result, "ReadRHS1 mid");
+    result = IMX715_IsiReadRegIss(handle, 0x3062, &rhs1_high);
+    CHECK_RESULT_RET(result, "ReadRHS1 high");
 
     *rhs1 = (rhs1_high << 16) | (rhs1_mid << 8) | rhs1_low;
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_ReadRHS2(IsiSensorHandle_t handle, uint32_t* rhs2) {
@@ -550,84 +593,103 @@ static RESULT IMX715_ReadRHS2(IsiSensorHandle_t handle, uint32_t* rhs2) {
     RESULT result;
 
     result = IMX715_IsiReadRegIss(handle, 0x3064, &rhs2_low);
-    result |= IMX715_IsiReadRegIss(handle, 0x3065, &rhs2_mid);
-    result |= IMX715_IsiReadRegIss(handle, 0x3066, &rhs2_high);
-    if (result) return RET_FAILURE;
+    CHECK_RESULT_RET(result, "ReadRHS2 low");
+    result = IMX715_IsiReadRegIss(handle, 0x3065, &rhs2_mid);
+    CHECK_RESULT_RET(result, "ReadRHS2 mid");
+    result = IMX715_IsiReadRegIss(handle, 0x3066, &rhs2_high);
+    CHECK_RESULT_RET(result, "ReadRHS2 high");
 
     *rhs2 = (rhs2_high << 16) | (rhs2_mid << 8) | rhs2_low;
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_WriteShr0(IsiSensorHandle_t handle, uint32_t shr) {
     RESULT result;
     result = IMX715_IsiWriteRegIss(handle, 0x3050, shr & 0xff);
-    result |= IMX715_IsiWriteRegIss(handle, 0x3051, (shr >> 8) & 0xff);
-    result |= IMX715_IsiWriteRegIss(handle, 0x3052, (shr >> 16) & 0x0f);
+    CHECK_RESULT_RET(result, "WriteShr0 low");
+    result = IMX715_IsiWriteRegIss(handle, 0x3051, (shr >> 8) & 0xff);
+    CHECK_RESULT_RET(result, "WriteShr0 mid");
+    result = IMX715_IsiWriteRegIss(handle, 0x3052, (shr >> 16) & 0x0f);
+    CHECK_RESULT_RET(result, "WriteShr0 high");
 
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_WriteShr1(IsiSensorHandle_t handle, uint32_t shr) {
     RESULT result;
 
     result = IMX715_IsiWriteRegIss(handle, 0x3054, shr & 0xff);
-    result |= IMX715_IsiWriteRegIss(handle, 0x3055, (shr >> 8) & 0xff);
-    result |= IMX715_IsiWriteRegIss(handle, 0x3056, (shr >> 16) & 0x0f);
+    CHECK_RESULT_RET(result, "WriteShr1 low");
+    result = IMX715_IsiWriteRegIss(handle, 0x3055, (shr >> 8) & 0xff);
+    CHECK_RESULT_RET(result, "WriteShr1 mid");
+    result = IMX715_IsiWriteRegIss(handle, 0x3056, (shr >> 16) & 0x0f);
+    CHECK_RESULT_RET(result, "WriteShr1 high");
 
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_WriteShr2(IsiSensorHandle_t handle, uint32_t shr) {
     RESULT result;
 
     result = IMX715_IsiWriteRegIss(handle, 0x3058, shr & 0xff);
-    result |= IMX715_IsiWriteRegIss(handle, 0x3059, (shr >> 8) & 0xff);
-    result |= IMX715_IsiWriteRegIss(handle, 0x305a, (shr >> 16) & 0x0f);
+    CHECK_RESULT_RET(result, "WriteShr2 low");
+    result = IMX715_IsiWriteRegIss(handle, 0x3059, (shr >> 8) & 0xff);
+    CHECK_RESULT_RET(result, "WriteShr2 mid");
+    result = IMX715_IsiWriteRegIss(handle, 0x305a, (shr >> 16) & 0x0f);
+    CHECK_RESULT_RET(result, "WriteShr2 high");
 
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_WriteGain(IsiSensorHandle_t handle, uint32_t gain) {
     RESULT result;
 
     result = IMX715_IsiWriteRegIss(handle, 0x3090, (gain & 0x00ff));
-	result |= IMX715_IsiWriteRegIss(handle, 0x3091, (gain & 0x0700) >> 8);
+    CHECK_RESULT_RET(result, "WriteGain low");
+    result = IMX715_IsiWriteRegIss(handle, 0x3091, (gain & 0x0700) >> 8);
+    CHECK_RESULT_RET(result, "WriteGain high");
 
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_WriteGain1(IsiSensorHandle_t handle, uint32_t gain) {
     RESULT result;
 
     result = IMX715_IsiWriteRegIss(handle, 0x3092, (gain & 0x00ff));
-	result |= IMX715_IsiWriteRegIss(handle, 0x3093, (gain & 0x0700) >> 8);
+    CHECK_RESULT_RET(result, "WriteGain1 low");
+    result = IMX715_IsiWriteRegIss(handle, 0x3093, (gain & 0x0700) >> 8);
+    CHECK_RESULT_RET(result, "WriteGain1 high");
 
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_WriteGain2(IsiSensorHandle_t handle, uint32_t gain) {
     RESULT result;
 
     result = IMX715_IsiWriteRegIss(handle, 0x3094, (gain & 0x00ff));
-	result |= IMX715_IsiWriteRegIss(handle, 0x3095, (gain & 0x0700) >> 8);
+    CHECK_RESULT_RET(result, "WriteGain2 low");
+    result = IMX715_IsiWriteRegIss(handle, 0x3095, (gain & 0x0700) >> 8);
+    CHECK_RESULT_RET(result, "WriteGain2 high");
 
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_LockRegHold(IsiSensorHandle_t handle) {
     RESULT result;
 
     result = IMX715_IsiWriteRegIss(handle, 0x3001, 0x1);
+    CHECK_RESULT_RET(result, "LockRegHold");
 
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_UnlockRegHold(IsiSensorHandle_t handle) {
     RESULT result;
 
     result = IMX715_IsiWriteRegIss(handle, 0x3001, 0x0);
+    CHECK_RESULT_RET(result, "UnlockRegHold");
 
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_IsiGetModeIss(IsiSensorHandle_t handle, IsiMode_t* pMode) {
@@ -649,12 +711,15 @@ static RESULT IMX715_IsiSetModeIss(IsiSensorHandle_t handle, IsiMode_t* pMode) {
 
     IMX715_Context_t* pIMX715Ctx = (IMX715_Context_t*)handle;
     if (pIMX715Ctx == NULL) {
+        TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
     HalContext_t* pHalCtx = (HalContext_t*)pIMX715Ctx->IsiCtx.HalHandle;
 
     ret = ioctl(pHalCtx->sensor_fd, VVSENSORIOC_S_SENSOR_MODE, pMode);
     if (ret != 0) {
+        TRACE(IMX715_ERROR, "%s: ioctl VVSENSORIOC_S_SENSOR_MODE failed, errno=%d (%s)\n",
+              __func__, errno, strerror(errno));
         return (RET_FAILURE);
     }
 
@@ -694,10 +759,7 @@ static RESULT IMX715_IsiEnumModeIss(IsiSensorHandle_t handle,
 
     HalContext_t* pHalCtx = (HalContext_t*)pIMX715Ctx->IsiCtx.HalHandle;
     result = IMX715_IsiHalEnumModeIss(pHalCtx, pEnumMode);
-    if (result != RET_SUCCESS) {
-        TRACE(IMX715_ERROR, "%s: sensor enum mode error!\n", __func__);
-        return (RET_FAILURE);
-    }
+    CHECK_RESULT_RET(result, "sensor enum mode");
 
     return result;
 }
@@ -715,7 +777,10 @@ static RESULT IMX715_IsiGetCapsIss(IsiSensorHandle_t handle, IsiCaps_t* pCaps) {
         return (RET_NULL_POINTER);
     }
 
-    if (!pIMX715Ctx->Configured) IMX715_IsiSetupIss(handle, pCaps);
+    if (!pIMX715Ctx->Configured) {
+        result = IMX715_IsiSetupIss(handle, pCaps);
+        CHECK_RESULT_RET(result, "Setup");
+    }
 
     pCaps->BusWidth = pIMX715Ctx->SensorMode.bit_width;
     pCaps->Mode = ISI_MODE_BAYER;
@@ -843,16 +908,11 @@ static RESULT IMX715_IsiSetupIss(IsiSensorHandle_t handle,
 
     memcpy(&pIMX715Ctx->CapsConfig, pCaps, sizeof(pIMX715Ctx->CapsConfig));
 
-    /* 1.) SW reset of image sensor (via I2C register interface)  be careful,
-     * bits 6..0 are reserved, reset bit is not sticky */
-    TRACE(IMX715_DEBUG, "%s: IMX715 System-Reset executed\n", __func__);
-    osSleep(100);
+    /* SW reset comment preserved - no actual reset code was present,
+     * and the 100ms sleep was unnecessary (no hardware access in this function). */
 
     result = IMX715_AecSetModeParameters(pIMX715Ctx, pCaps);
-    if (result != RET_SUCCESS) {
-        TRACE(IMX715_ERROR, "%s: SetupOutputWindow failed.\n", __func__);
-        return (result);
-    }
+    CHECK_RESULT_RET(result, "AecSetModeParameters");
 
     pIMX715Ctx->Configured = BOOL_TRUE;
     TRACE(IMX715_DEBUG, "%s: (exit)\n", __func__);
@@ -889,16 +949,18 @@ static RESULT IMX715_IsiGetRevisionIss(IsiSensorHandle_t handle,
     } else {
         reg_val = 0;
         result = IMX715_IsiReadRegIss(handle, 0x3a04, &reg_val);
+        CHECK_RESULT_RET(result, "read sensor ID high");
         sensor_id = (reg_val & 0xff) << 8;
 
         reg_val = 0;
-        result |= IMX715_IsiReadRegIss(handle, 0x3a05, &reg_val);
+        result = IMX715_IsiReadRegIss(handle, 0x3a05, &reg_val);
+        CHECK_RESULT_RET(result, "read sensor ID low");
         sensor_id |= (reg_val & 0xff);
     }
 
     *pValue = sensor_id;
     TRACE(IMX715_DEBUG, "%s (exit)\n", __func__);
-    return (result);
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_IsiSetStreamingIss(IsiSensorHandle_t handle, bool_t is_on) {
@@ -943,26 +1005,35 @@ static RESULT IMX715_IsiGetGainLimitsIss(IsiSensorHandle_t handle,
     return (result);
 }
 
-static size_t IMX715_GetNumExposures(IMX715_Context_t* pIMX715Ctx) {
+static RESULT IMX715_GetNumExposures(IMX715_Context_t* pIMX715Ctx, size_t* num_exposures) {
     if (pIMX715Ctx == NULL) {
-        return 0;
+        TRACE(IMX715_ERROR, "%s: Invalid sensor context\n", __func__);
+        return RET_NULL_POINTER;
+    }
+
+    if (num_exposures == NULL) {
+        TRACE(IMX715_ERROR, "%s: Invalid output parameter\n", __func__);
+        return RET_NULL_POINTER;
     }
 
     if (pIMX715Ctx->SensorMode.hdr_mode == SENSOR_MODE_LINEAR) {
-        return 1; // SDR
+        *num_exposures = 1; // SDR
     } else if (pIMX715Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
-        return IMX715_2DOL_NUM_EXP;
+        *num_exposures = IMX715_2DOL_NUM_EXP;
     } else if (pIMX715Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
-        return IMX715_3DOL_NUM_EXP;
+        *num_exposures = IMX715_3DOL_NUM_EXP;
     } else {
         TRACE(IMX715_ERROR, "%s: Unsupported HDR mode %d with stitching mode %d\n",
             __func__, pIMX715Ctx->SensorMode.hdr_mode, pIMX715Ctx->SensorMode.stitching_mode);
-        return 0;
+        return RET_FAILURE;
     }
+
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_UpdateCurrLEFIntegrationTimeFromFsc(IMX715_Context_t* pIMX715Ctx, uint32_t fsc, uint32_t shr0) {
     if (pIMX715Ctx == NULL) {
+        TRACE(IMX715_ERROR, "%s: Invalid sensor context\n", __func__);
         return RET_NULL_POINTER;
     }
 
@@ -978,13 +1049,18 @@ static RESULT IMX715_UpdateCurrLEFIntegrationTimeFromFsc(IMX715_Context_t* pIMX7
 
 static RESULT IMX715_UpdateCurrLEFIntegrationTimeFromVmax(IMX715_Context_t* pIMX715Ctx, uint32_t vmax, uint32_t shr0) {
     if (pIMX715Ctx == NULL) {
+        TRACE(IMX715_ERROR, "%s: Invalid sensor context\n", __func__);
         return RET_NULL_POINTER;
     }
 
-    size_t dol = IMX715_GetNumExposures(pIMX715Ctx);
+    size_t dol = 0;
+    RESULT result = IMX715_GetNumExposures(pIMX715Ctx, &dol);
+    CHECK_RESULT_RET(result, "GetNumExposures");
     uint32_t fsc = vmax * dol;
     TRACE(IMX715_DEBUG, "%s: fsc = vmax[%u] * dol[%zu] = %u\n", __func__, vmax, dol, fsc);
-    return IMX715_UpdateCurrLEFIntegrationTimeFromFsc(pIMX715Ctx, fsc, shr0);
+    result = IMX715_UpdateCurrLEFIntegrationTimeFromFsc(pIMX715Ctx, fsc, shr0);
+    CHECK_RESULT_RET(result, "UpdateCurrLEFIntegrationTimeFromFsc");
+    return result;
 }
 
 static inline int IMX715_getFlickerPeaksPerSec(IsiSensorAntibandingMode_t mode) {
@@ -997,22 +1073,23 @@ static inline int IMX715_getFlickerPeaksPerSec(IsiSensorAntibandingMode_t mode) 
     return 0; // Defaults to 0 if mode not found
 }
 
-static inline uint32_t IMX715_getNewVmaxAntiFlicker(IMX715_Context_t *pIMX715Ctx, uint32_t requestedVmax) {
+static inline RESULT IMX715_getNewVmaxAntiFlicker(IMX715_Context_t *pIMX715Ctx, uint32_t requestedVmax, uint32_t *outClosestVmax) {
     uint32_t closestVmax = requestedVmax;
     int peaks = 0;
     int difference = INT_MAX;
     int minDifference = INT_MAX;
     if (!pIMX715Ctx) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
-        return (-1);
+        TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        return RET_FAILURE;
     }
     peaks = IMX715_getFlickerPeaksPerSec(pIMX715Ctx->flicker_fps_mode);
     if (peaks == 0) {
         // No anti-flicker mode, return requested or original Vmax
         if (pIMX715Ctx->unlimit_fps && pIMX715Ctx->unlimit_fps_vmax_changed)
-            return requestedVmax;
+            *outClosestVmax = requestedVmax;
         else
-            return pIMX715Ctx->original_vmax;
+            *outClosestVmax = pIMX715Ctx->original_vmax;
+        return RET_SUCCESS;
     }
 
     for (int i = 1; i < peaks; ++i) {
@@ -1031,7 +1108,8 @@ static inline uint32_t IMX715_getNewVmaxAntiFlicker(IMX715_Context_t *pIMX715Ctx
             break;
         }
     }
-    return closestVmax;
+    *outClosestVmax = closestVmax;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX715_IsiUnlimitFpsIss(IsiSensorHandle_t handle,
@@ -1079,7 +1157,8 @@ static RESULT IMX715_IsiLimitFpsIss(IsiSensorHandle_t handle) {
     if (pIMX715Ctx->Streaming == BOOL_FALSE)
         return result;
 
-    IMX715_ReadVmax(handle, &current_vmax);
+    result = IMX715_ReadVmax(handle, &current_vmax);
+    CHECK_RESULT_RET(result, "ReadVmax");
 
     pIMX715Ctx->unlimit_fps = 0;
     pIMX715Ctx->unlimit_fps_vmax_changed = 0;
@@ -1089,18 +1168,23 @@ static RESULT IMX715_IsiLimitFpsIss(IsiSensorHandle_t handle) {
 
     new_vmax = pIMX715Ctx->original_vmax;
     if (pIMX715Ctx->flicker_fps_mode != ISI_AE_ANTIBANDING_MODE_OFF) {
-        new_vmax = IMX715_getNewVmaxAntiFlicker(pIMX715Ctx, pIMX715Ctx->original_vmax);
+        result = IMX715_getNewVmaxAntiFlicker(pIMX715Ctx, pIMX715Ctx->original_vmax, &new_vmax);
+        CHECK_RESULT_RET(result, "getNewVmaxAntiFlicker");
         TRACE(IMX715_DEBUG, "%s -Anti Flicker Fps mode %d, set new vmax %u\n", __func__, pIMX715Ctx->flicker_fps_mode, new_vmax);
     }
 
     if (current_vmax != new_vmax) {
-        result |= IMX715_LockRegHold(handle);
-        result |= IMX715_WriteVmax(handle, new_vmax);
-        result |= IMX715_UnlockRegHold(handle);
+        result = IMX715_LockRegHold(handle);
+        CHECK_RESULT_RET(result, "LockRegHold");
+        result = IMX715_WriteVmax(handle, new_vmax);
+        CHECK_RESULT_RET(result, "WriteVmax");
+        result = IMX715_UnlockRegHold(handle);
+        CHECK_RESULT_RET(result, "UnlockRegHold");
 
 
         int shr = MAX((int)current_vmax - (int)(pIMX715Ctx->AecCurIntegrationTimeLEF / pIMX715Ctx->one_line_exp_time), IMX715_MIN_SHR);
-        result |= IMX715_UpdateCurrLEFIntegrationTimeFromVmax(pIMX715Ctx, new_vmax, shr);
+        result = IMX715_UpdateCurrLEFIntegrationTimeFromVmax(pIMX715Ctx, new_vmax, shr);
+        CHECK_RESULT_RET(result, "UpdateCurrLEFIntegrationTimeFromVmax");
     }
 
     pIMX715Ctx->MaxIntegrationLine =
@@ -1161,12 +1245,8 @@ static RESULT IMX715_IsiGetIntegrationTimeLimitsIss(
     IsiSensorHandle_t handle, float* pMinIntegrationTime,
     float* pMaxIntegrationTime) {
     IMX715_Context_t* pIMX715Ctx = (IMX715_Context_t*)handle;
-    uint32_t fsc;
-    size_t dol;
-    float max_long_it, max_short_it;
-    float min_long_it, min_short_it;
+    float max_short_it, min_short_it;
     RESULT result = RET_SUCCESS;
-    int vmax = -1;
     int rhs1 = -1;
     HalContext_t* pHalCtx = NULL;
 
@@ -1200,45 +1280,28 @@ static RESULT IMX715_IsiGetIntegrationTimeLimitsIss(
         return (RET_WRONG_HANDLE);
     }
 
-    vmax = IMX715_GetCtrl(pHalCtx->sensor_fd, IMX715_CID_VMAX);
-    if (vmax < 0) {
-        TRACE(IMX715_ERROR, "%s: Unable to read VMAX\n", __func__);
-        return RET_FAILURE;
-    }
-
-    dol = IMX715_GetNumExposures(pIMX715Ctx);
-    if (dol == 0) {
-        TRACE(IMX715_ERROR, "%s: Unable to get number of exposures\n", __func__);
-        return RET_FAILURE;
-    }
-
-    fsc = vmax * dol;
     if (pIMX715Ctx->cur_rhs1 == 0) {
-        rhs1 = IMX715_GetCtrl(pHalCtx->sensor_fd, IMX715_CID_RHS1);
-        if (rhs1 < 0) {
-            TRACE(IMX715_ERROR, "%s: Unable to read RHS1\n", __func__);
-            return RET_FAILURE;
-        }
+        result = IMX715_GetCtrl(pHalCtx->sensor_fd, IMX715_CID_RHS1, &rhs1);
+        CHECK_RESULT_RET(result, "GetCtrl RHS1");
         pIMX715Ctx->cur_rhs1 = (uint32_t)rhs1;
     }
 
     if (pIMX715Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
-        max_long_it = (fsc - pIMX715Ctx->cur_rhs1 - IMX715_2DOL_SHR0_RHS1_GAP) * pIMX715Ctx->one_line_exp_time;
         max_short_it = (pIMX715Ctx->cur_rhs1 - IMX715_2DOL_SHR1_MIN_GAP) * pIMX715Ctx->one_line_exp_time;
         min_short_it = IMX715_2DOL_SHR1_RHS1_GAP * pIMX715Ctx->one_line_exp_time;
-        min_long_it = IMX715_2DOL_SHR0_FSC_GAP * pIMX715Ctx->one_line_exp_time;
     } else {
         /* TODO: implement 3dol exposure */
-        max_long_it = (fsc - pIMX715Ctx->cur_rhs1 - IMX715_2DOL_SHR0_RHS1_GAP) * pIMX715Ctx->one_line_exp_time;
         max_short_it = (pIMX715Ctx->cur_rhs1 - IMX715_2DOL_SHR1_MIN_GAP) * pIMX715Ctx->one_line_exp_time;
         min_short_it = IMX715_2DOL_SHR1_RHS1_GAP * pIMX715Ctx->one_line_exp_time;
-        min_long_it = IMX715_2DOL_SHR0_FSC_GAP * pIMX715Ctx->one_line_exp_time;
     }
 
-    TRACE(IMX715_INFO, "%s: min_long_it=%f, max_long_it=%f, min_short_it=%f, max_short_it=%f, ratio[0]=%f\n", __func__, min_long_it, max_long_it, min_short_it, max_short_it,pIMX715Ctx->hdr_ratio[0]);
-
-    pIMX715Ctx->AecMinIntegrationTime = MAX((min_long_it/pIMX715Ctx->hdr_ratio[0]), min_short_it);
-    pIMX715Ctx->AecMaxIntegrationTime = MIN((max_long_it/pIMX715Ctx->hdr_ratio[0]), max_short_it);
+    /*
+     * Report the actual SEF1 hardware limits.  The ratio is enforced inside
+     * Calculate2DOLExposures / Calculate3DOLExposures which will maximise the
+     * LEF integration time and apply LEF gain when needed to meet the ratio.
+     */
+    pIMX715Ctx->AecMinIntegrationTime = min_short_it;
+    pIMX715Ctx->AecMaxIntegrationTime = max_short_it;
 
     *pMinIntegrationTime = pIMX715Ctx->AecMinIntegrationTime;
     *pMaxIntegrationTime = pIMX715Ctx->AecMaxIntegrationTime;
@@ -1291,10 +1354,15 @@ RESULT IMX715_IsiGetGainIss(IsiSensorHandle_t handle, float *pSetGain)
 		return (RET_NULL_POINTER);
 	}
 
-	if (pIMX715Ctx->enableHdr)
-		return IMX715_IsiGetSEF1GainIss(handle, pSetGain);
+	if (pIMX715Ctx->enableHdr) {
+		RESULT result = IMX715_IsiGetSEF1GainIss(handle, pSetGain);
+		CHECK_RESULT_RET(result, "GetSEF1Gain");
+		return result;
+	}
 
-	return IMX715_IsiGetLEFGainIss(handle, pSetGain);
+	RESULT result = IMX715_IsiGetLEFGainIss(handle, pSetGain);
+	CHECK_RESULT_RET(result, "GetLEFGain");
+	return result;
 }
 
 RESULT IMX715_IsiGetLEFGainIss(IsiSensorHandle_t handle, float *pSetGain)
@@ -1426,12 +1494,15 @@ RESULT IMX715_IsiSetGainIss(IsiSensorHandle_t handle, float NewGain,
 	if (pIMX715Ctx->enableHdr) {
 		result = IMX715_IsiSetSEF1GainIss(handle, 0, NewGain, pSetGain,
 						hdr_ratio);
+		CHECK_RESULT_RET(result, "SetSEF1Gain");
 
-		result |= IMX715_IsiSetSEF2GainIss(handle, 0, NewGain, pSetGain,
+		result = IMX715_IsiSetSEF2GainIss(handle, 0, NewGain, pSetGain,
 						hdr_ratio);
+		CHECK_RESULT_RET(result, "SetSEF2Gain");
 	}
-	result |= IMX715_IsiSetLEFGainIss(handle, NewGain, pSetGain, hdr_ratio);
-	return result;
+	result = IMX715_IsiSetLEFGainIss(handle, NewGain, pSetGain, hdr_ratio);
+	CHECK_RESULT_RET(result, "SetLEFGain");
+	return RET_SUCCESS;
 }
 
 static inline uint32_t _linear2sensorGain(float gain)
@@ -1483,18 +1554,17 @@ RESULT IMX715_IsiSetLEFGainIss(IsiSensorHandle_t handle, float NewGain,
 	uint32_t Gain = _linear2sensorGain(NewGain);
 	TRACE(IMX715_DEBUG, "%s: writting 0x%x to GAIN\n", __func__, Gain);
 
-    result |= IMX715_LockRegHold(handle);
-	result |= IMX715_WriteGain(handle, Gain);
-	result |= IMX715_UnlockRegHold(handle);
-
-	if (result != 0) {
-		return RET_FAILURE;
-	}
+    result = IMX715_LockRegHold(handle);
+    CHECK_RESULT_RET(result, "LockRegHold");
+	result = IMX715_WriteGain(handle, Gain);
+	CHECK_RESULT_RET(result, "WriteGain");
+	result = IMX715_UnlockRegHold(handle);
+	CHECK_RESULT_RET(result, "UnlockRegHold");
 
 	pIMX715Ctx->AecCurGainLEF = _sensorGain2linear(Gain);
 	*pSetGain = pIMX715Ctx->AecCurGainLEF;
 	TRACE(IMX715_DEBUG, "%s: g=%f\n", __func__, *pSetGain);
-	return (result);
+	return RET_SUCCESS;
 }
 
 RESULT IMX715_IsiSetSEF1GainIss(IsiSensorHandle_t handle,
@@ -1516,15 +1586,18 @@ RESULT IMX715_IsiSetSEF1GainIss(IsiSensorHandle_t handle,
 	uint32_t Gain = _linear2sensorGain(NewGain);
 	TRACE(IMX715_DEBUG, "%s: writting 0x%x to GAIN1\n", __func__, Gain);
 
-    result |= IMX715_LockRegHold(handle);
-	result |= IMX715_WriteGain1(handle, Gain);
-    result |= IMX715_UnlockRegHold(handle);
+	result = IMX715_LockRegHold(handle);
+	CHECK_RESULT_RET(result, "LockRegHold");
+	result = IMX715_WriteGain1(handle, Gain);
+	CHECK_RESULT_RET(result, "WriteGain1");
+	result = IMX715_UnlockRegHold(handle);
+	CHECK_RESULT_RET(result, "UnlockRegHold");
 
 	pIMX715Ctx->AecCurGainSEF1 = _sensorGain2linear(Gain);
 	*pSetGain = pIMX715Ctx->AecCurGainSEF1;
 
 	TRACE(IMX715_DEBUG, "%s: g=%f\n", __func__, *pSetGain);
-	return (result);
+	return RET_SUCCESS;
 }
 
 RESULT IMX715_IsiSetSEF2GainIss(IsiSensorHandle_t handle,
@@ -1547,15 +1620,18 @@ RESULT IMX715_IsiSetSEF2GainIss(IsiSensorHandle_t handle,
 	uint32_t Gain = _linear2sensorGain(NewGain);
 	TRACE(IMX715_DEBUG, "%s: writting 0x%x to GAIN2\n", __func__, Gain);
 
-    result |= IMX715_LockRegHold(handle);
-	result |= IMX715_WriteGain2(handle, Gain);
-    result |= IMX715_UnlockRegHold(handle);
+	result = IMX715_LockRegHold(handle);
+	CHECK_RESULT_RET(result, "LockRegHold");
+	result = IMX715_WriteGain2(handle, Gain);
+	CHECK_RESULT_RET(result, "WriteGain2");
+	result = IMX715_UnlockRegHold(handle);
+	CHECK_RESULT_RET(result, "UnlockRegHold");
 
 	pIMX715Ctx->AecCurGainSEF2 = _sensorGain2linear(Gain);
 	*pSetGain = pIMX715Ctx->AecCurGainSEF2;
 
 	TRACE(IMX715_DEBUG, "%s: g=%f\n", __func__, *pSetGain);
-	return (result);
+	return RET_SUCCESS;
 }
 
 /* Integration Time get functions*/
@@ -1566,7 +1642,7 @@ RESULT IMX715_IsiGetIntegrationTimeIss(IsiSensorHandle_t handle,
 	IMX715_Context_t *pIMX715Ctx = (IMX715_Context_t *)handle;
 
 	if (!pIMX715Ctx) {
-		printf("%s: Invalid sensor handle (NULL pointer detected)\n",
+		TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n",
 		       __func__);
 		return (RET_WRONG_HANDLE);
 	}
@@ -1576,10 +1652,15 @@ RESULT IMX715_IsiGetIntegrationTimeIss(IsiSensorHandle_t handle,
 	
 	TRACE(IMX715_DEBUG, "%s - enter\n", __func__);
 	
-	if (pIMX715Ctx->enableHdr)
-		return IMX715_IsiGetSEF1IntegrationTimeIss(handle, pSetIntegrationTime);
+	if (pIMX715Ctx->enableHdr) {
+		RESULT result = IMX715_IsiGetSEF1IntegrationTimeIss(handle, pSetIntegrationTime);
+		CHECK_RESULT_RET(result, "GetSEF1IntegrationTime");
+		return result;
+	}
 	
-	return IMX715_IsiGetLEFIntegrationTimeIss(handle, pSetIntegrationTime);
+	RESULT result = IMX715_IsiGetLEFIntegrationTimeIss(handle, pSetIntegrationTime);
+	CHECK_RESULT_RET(result, "GetLEFIntegrationTime");
+	return result;
 }
 
 RESULT IMX715_IsiGetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
@@ -1590,7 +1671,7 @@ RESULT IMX715_IsiGetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
 
 
 	if (!pIMX715Ctx) {
-		printf("%s: Invalid sensor handle (NULL pointer detected)\n",
+		TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n",
 		       __func__);
 		return (RET_WRONG_HANDLE);
 	}
@@ -1610,7 +1691,7 @@ RESULT IMX715_IsiGetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 	RESULT result = RET_SUCCESS;
 
 	if (!pIMX715Ctx) {
-		printf("%s: Invalid sensor handle (NULL pointer detected)\n",
+		TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n",
 		       __func__);
 		return (RET_WRONG_HANDLE);
 	}
@@ -1629,7 +1710,7 @@ RESULT IMX715_IsiGetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 	RESULT result = RET_SUCCESS;
 
 	if (!pIMX715Ctx) {
-		printf("%s: Invalid sensor handle (NULL pointer detected)\n",
+		TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n",
 		       __func__);
 		return (RET_WRONG_HANDLE);
 	}
@@ -1647,7 +1728,7 @@ RESULT IMX715_IsiGetIntegrationTimeIncrementIss(IsiSensorHandle_t handle,
     RESULT result = RET_SUCCESS;
 
     if (!pIMX715Ctx) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
 
@@ -1671,20 +1752,24 @@ RESULT IMX715_IsiSetIntegrationTimeIss(IsiSensorHandle_t handle,
 	IMX715_Context_t *pIMX715Ctx = (IMX715_Context_t *)handle;
 
 	if (!pIMX715Ctx) {
-		printf("%s: Invalid sensor handle (NULL pointer detected)\n",
+		TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n",
 		       __func__);
 		return (RET_WRONG_HANDLE);
 	}
 
 	if (pIMX715Ctx->enableHdr) {
-		return IMX715_IsiSetSEF1IntegrationTimeIss(
+		RESULT result = IMX715_IsiSetSEF1IntegrationTimeIss(
 			handle, NewIntegrationTime, pSetIntegrationTime,
 			pNumberOfFramesToSkip, hdr_ratio);
+		CHECK_RESULT_RET(result, "SetSEF1IntegrationTime");
+		return result;
 	}
 
-	return IMX715_IsiSetLEFIntegrationTimeIss(
+	RESULT result = IMX715_IsiSetLEFIntegrationTimeIss(
 		handle, NewIntegrationTime, pSetIntegrationTime,
 		pNumberOfFramesToSkip, hdr_ratio);
+	CHECK_RESULT_RET(result, "SetLEFIntegrationTime");
+	return result;
 }
 
 RESULT IMX715_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
@@ -1705,12 +1790,12 @@ RESULT IMX715_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
     uint32_t rhs1;
     uint32_t rhs2;
     if (!pIMX715Ctx) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
 
     if (!pSetIntegrationTime || !pNumberOfFramesToSkip) {
-        printf("%s: Invalid parameter (NULL pointer detected)\n", __func__);
+        TRACE(IMX715_ERROR, "%s: Invalid parameter (NULL pointer detected)\n", __func__);
         return (RET_NULL_POINTER);
     }
 
@@ -1733,10 +1818,8 @@ RESULT IMX715_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
             rhs1 = pIMX715Ctx->cur_rhs1;
             rhs2 = pIMX715Ctx->cur_rhs2;
             if (pIMX715Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S) {
-                if(IMX715_ReadVmax(pIMX715Ctx, &new_vmax) != RET_SUCCESS){
-                    TRACE(IMX715_ERROR, "%s: unable to read vmax\n", __func__);
-                    new_vmax = IMX715_VMAX_2DOL_HDR;
-                }
+                result = IMX715_ReadVmax(pIMX715Ctx, &new_vmax);
+                CHECK_RESULT_RET(result, "ReadVmax");
                 new_vmax *= IMX715_2DOL_NUM_EXP;
 
                 exp = new_vmax - exp;
@@ -1757,6 +1840,7 @@ RESULT IMX715_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
                 return RET_FAILURE;
             }
             result = IMX715_ReadVmax(handle, &current_vmax);
+            CHECK_RESULT_RET(result, "ReadVmax");
 
             if (pIMX715Ctx->original_vmax == 0) {                
                 pIMX715Ctx->original_vmax = current_vmax;
@@ -1788,7 +1872,8 @@ RESULT IMX715_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
                 pIMX715Ctx->unlimit_fps_vmax_changed = new_vmax > pIMX715Ctx->original_vmax && pIMX715Ctx->unlimit_fps;
 
                 if (pIMX715Ctx->flicker_fps_mode != ISI_AE_ANTIBANDING_MODE_OFF) {
-                    new_vmax = IMX715_getNewVmaxAntiFlicker(pIMX715Ctx, new_vmax);
+                    result = IMX715_getNewVmaxAntiFlicker(pIMX715Ctx, new_vmax, &new_vmax);
+                    CHECK_RESULT_RET(result, "getNewVmaxAntiFlicker");
                     TRACE(IMX715_DEBUG, "%s -Anti Flicker Fps mode %d, set new vmax %u\n", __func__, pIMX715Ctx->flicker_fps_mode, new_vmax);
                 }
 
@@ -1800,17 +1885,22 @@ RESULT IMX715_IsiSetLEFIntegrationTimeIss(IsiSensorHandle_t handle,
             }
         }
 
-        result |= IMX715_LockRegHold(handle);
+        result = IMX715_LockRegHold(handle);
+        CHECK_RESULT_RET(result, "LockRegHold");
         if (vmax_updated && pIMX715Ctx->unlimit_fps && !pIMX715Ctx->enableHdr) {
             result = IMX715_WriteVmax(handle, new_vmax);
+            CHECK_RESULT_RET(result, "WriteVmax");
         }
 
         TRACE(IMX715_DEBUG, "%s - writing 0x%x to SHR0\n", __func__, shr);
-        result |= IMX715_WriteShr0(handle, shr);
-        result |= IMX715_UnlockRegHold(handle);
+        result = IMX715_WriteShr0(handle, shr);
+        CHECK_RESULT_RET(result, "WriteShr0");
+        result = IMX715_UnlockRegHold(handle);
+        CHECK_RESULT_RET(result, "UnlockRegHold");
 
         // In this context, the "new_vmax" is actually the FSC (multiplied by DOL), not the VMAX.
-        result |= IMX715_UpdateCurrLEFIntegrationTimeFromFsc(pIMX715Ctx, new_vmax, shr);
+        result = IMX715_UpdateCurrLEFIntegrationTimeFromFsc(pIMX715Ctx, new_vmax, shr);
+        CHECK_RESULT_RET(result, "UpdateCurrLEFIntegrationTimeFromFsc");
 
         *pNumberOfFramesToSkip = 1U;
     } else {
@@ -1835,7 +1925,7 @@ RESULT IMX715_IsiSetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 	uint32_t rhs1;
 
 	if (!pIMX715Ctx) {
-		printf("%s: Invalid sensor handle (NULL pointer detected)\n",
+		TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n",
 		       __func__);
 		return (RET_WRONG_HANDLE);
 	}
@@ -1848,7 +1938,7 @@ RESULT IMX715_IsiSetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 	rhs1 = pIMX715Ctx->cur_rhs1;
 
 	if (!pSetIntegrationTimeSEF1 || !pNumberOfFramesToSkip) {
-		printf("%s: Invalid parameter (NULL pointer detected)\n",
+		TRACE(IMX715_ERROR, "%s: Invalid parameter (NULL pointer detected)\n",
 		       __func__);
 		return (RET_NULL_POINTER);
 	}
@@ -1863,9 +1953,12 @@ RESULT IMX715_IsiSetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
 		shr1 = shr1 < rhs1 - IMX715_2DOL_SHR1_RHS1_GAP ? shr1 : rhs1 - IMX715_2DOL_SHR1_RHS1_GAP;
 		TRACE(IMX715_DEBUG, "%s - writing 0x%x to SHR1\n", __func__, shr1);
 
-		result |= IMX715_LockRegHold(handle);
-		result |= IMX715_WriteShr1(handle, shr1);
-		result |= IMX715_UnlockRegHold(handle);
+		result = IMX715_LockRegHold(handle);
+		CHECK_RESULT_RET(result, "LockRegHold");
+		result = IMX715_WriteShr1(handle, shr1);
+		CHECK_RESULT_RET(result, "WriteShr1");
+		result = IMX715_UnlockRegHold(handle);
+		CHECK_RESULT_RET(result, "UnlockRegHold");
 
 		pIMX715Ctx->AecCurIntegrationTimeSEF1 = (rhs1 - shr1) * pIMX715Ctx->one_line_exp_time; // in sec
 		*pNumberOfFramesToSkip = 1U;
@@ -1892,7 +1985,7 @@ RESULT IMX715_IsiSetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 	uint32_t rhs2;
 
 	if (pIMX715Ctx->cur_rhs1 == 0 || pIMX715Ctx->cur_rhs2 == 0) {
-		printf("%s: Invalid parameter (RHS1 or RHS2 not set)\n", __func__);
+		TRACE(IMX715_ERROR, "%s: Invalid parameter (RHS1 or RHS2 not set)\n", __func__);
 		return (RET_WRONG_CONFIG);
 	}
 
@@ -1900,13 +1993,13 @@ RESULT IMX715_IsiSetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 	rhs2 = pIMX715Ctx->cur_rhs2;
 
 	if (!pIMX715Ctx) {
-		printf("%s: Invalid sensor handle (NULL pointer detected)\n",
+		TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n",
 		       __func__);
 		return (RET_WRONG_HANDLE);
 	}
 
 	if (!pSetIntegrationTimeSEF2 || !pNumberOfFramesToSkip) {
-		printf("%s: Invalid parameter (NULL pointer detected)\n",
+		TRACE(IMX715_ERROR, "%s: Invalid parameter (NULL pointer detected)\n",
 		       __func__);
 		return (RET_NULL_POINTER);
 	}
@@ -1921,9 +2014,12 @@ RESULT IMX715_IsiSetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 		exp = exp < rhs2 - IMX715_SHR2_RHS2_GAP ? exp : rhs2 - IMX715_SHR2_RHS2_GAP;
 		TRACE(IMX715_DEBUG, "%s - writing 0x%x to SHR2\n", __func__, exp);
 
-		result |= IMX715_LockRegHold(handle);
-		result |= IMX715_WriteShr2(handle, exp);
-		result |= IMX715_UnlockRegHold(handle);
+		result = IMX715_LockRegHold(handle);
+		CHECK_RESULT_RET(result, "LockRegHold");
+		result = IMX715_WriteShr2(handle, exp);
+		CHECK_RESULT_RET(result, "WriteShr2");
+		result = IMX715_UnlockRegHold(handle);
+		CHECK_RESULT_RET(result, "UnlockRegHold");
 
 		pIMX715Ctx->AecCurIntegrationTimeSEF2 = (rhs2 - exp) * pIMX715Ctx->one_line_exp_time; // in sec
 		*pNumberOfFramesToSkip = 1U;
@@ -2018,16 +2114,128 @@ RESULT IMX715_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
                                     float *o_long_gain, float *o_short_gain,
                                     float *hdr_ratio) {
     IMX715_Context_t* pIMX715Ctx = (IMX715_Context_t*)handle;
+    RESULT result = RET_SUCCESS;
+    uint32_t vmax;
+    size_t dol;
+    uint32_t fsc, rhs1;
+    float one_line;
+    uint32_t max_long_it_lines, min_long_it_lines;
+    float short_gain, required_long_ev;
+    uint32_t ideal_long_lines, long_it_lines;
+    float long_it, long_gain_needed, long_gain = 1.0f;
+    uint32_t long_gain_db, max_gain_db;
+    float adjusted_long_it, lower_gain, required_lines;
 
-	if (pIMX715Ctx->cur_rhs1 == 0) {
-		TRACE(IMX715_ERROR, "%s: Invalid parameter (RHS1 not set)\n", __func__);
-		return (RET_WRONG_CONFIG);
-	}
+    TRACE(IMX715_DEBUG, "%s: enter with NewIntegrationTime=%.6f NewGain=%.4f ratio=%.1f\n",
+        __func__, NewIntegrationTime, NewGain, hdr_ratio[0]);
 
-    *o_long_it = NewIntegrationTime * hdr_ratio[0];
-    *o_long_gain = _sensorGain2linear(_linear2sensorGain(NewGain));
+    result = IMX715_ReadVmax(handle, &vmax);
+    CHECK_RESULT_RET(result, "ReadVmax");
+
+    result = IMX715_GetNumExposures(pIMX715Ctx, &dol);
+    CHECK_RESULT_RET(result, "GetNumExposures");
+
+    fsc = vmax * (uint32_t)dol;
+    rhs1 = pIMX715Ctx->cur_rhs1;
+    one_line = pIMX715Ctx->one_line_exp_time;
+
+    if (one_line <= 0.0f) {
+        TRACE(IMX715_ERROR, "%s: Invalid one_line_exp_time (%.9f)\n", __func__, one_line);
+        return (RET_WRONG_CONFIG);
+    }
+
+    if (fsc <= rhs1 + IMX715_2DOL_SHR0_RHS1_GAP) {
+        TRACE(IMX715_ERROR, "%s: fsc(%u) <= rhs1(%u) + gap, invalid config\n",
+              __func__, fsc, rhs1);
+        return (RET_WRONG_CONFIG);
+    }
+
+    /* Hardware limits: SHR0 must satisfy  rhs1 + gap <= SHR0 <= fsc - gap. */
+    max_long_it_lines = fsc - rhs1 - IMX715_2DOL_SHR0_RHS1_GAP;
+    min_long_it_lines = IMX715_2DOL_SHR0_FSC_GAP;
+
+    /* Quantize short gain to sensor dB steps and compute the total long EV target. */
+    short_gain = _sensorGain2linear(_linear2sensorGain(NewGain));
+    required_long_ev = NewIntegrationTime * short_gain * hdr_ratio[0];
+
+    /* Step 1: Try to cover the required long EV with integration time alone (gain = 1). */
+    ideal_long_lines = (uint32_t)roundf(required_long_ev / one_line);
+    long_it_lines = MIN(ideal_long_lines, max_long_it_lines);
+    long_it_lines = MAX(long_it_lines, min_long_it_lines);
+    long_it = long_it_lines * one_line;
+
+    long_gain_needed = required_long_ev / long_it;
+
+    /* Step 1a: Prefer one extra IT line over applying gain when roundf rounded down. */
+    if (long_gain_needed > 1.0f && long_it_lines < max_long_it_lines) {
+        uint32_t ceil_lines = long_it_lines + 1;
+        float ceil_it = ceil_lines * one_line;
+        if (required_long_ev / ceil_it <= 1.0f) {
+            long_it_lines = ceil_lines;
+            long_it = ceil_it;
+            long_gain_needed = required_long_ev / long_it;
+        }
+    }
+
+    /*
+     * Step 1b: When the required EV is within IMX715_2DOL_MAX_IT_NEAR_LINES of
+     * max_long_it, the shortfall is a float-rounding artifact — accept unity
+     * gain and the negligible ratio deviation instead of bumping a gain step.
+     */
+    if (long_gain_needed > 1.0f && long_it_lines == max_long_it_lines) {
+        required_lines = required_long_ev / one_line;
+        if (required_lines - (float)max_long_it_lines < (float)IMX715_2DOL_MAX_IT_NEAR_LINES) {
+            long_gain_needed = 1.0f;
+        }
+    }
+
+    if (long_gain_needed <= 1.0f) {
+        long_gain = 1.0f;
+    } else {
+        /*
+         * Step 2: IT at maximum is not enough — apply the minimum gain that
+         * covers the remaining EV.  Quantize up (ceil) to ensure we meet the
+         * target, then check whether one step lower still suffices with max IT.
+         */
+        long_gain_db = _linear2sensorGainCeil(long_gain_needed);
+        long_gain = _sensorGain2linear(long_gain_db);
+
+        if (long_gain_db >= 1) {
+            lower_gain = _sensorGain2linear(long_gain_db - 1);
+            if ((float)max_long_it_lines * one_line * lower_gain >= required_long_ev) {
+                long_gain_db--;
+                long_gain = lower_gain;
+            }
+        }
+
+        if (long_gain_db == 0)
+            long_gain = 1.0f;
+
+        max_gain_db = _linear2sensorGain(IMX715_MAX_GAIN_AEC);
+        if (long_gain_db > max_gain_db) {
+            long_gain_db = max_gain_db;
+            long_gain = _sensorGain2linear(long_gain_db);
+        }
+
+        /* Step 3: Re-adjust long IT to match the quantized gain, getting closer to the exact ratio. */
+        adjusted_long_it = required_long_ev / long_gain;
+        long_it_lines = (uint32_t)roundf(adjusted_long_it / one_line);
+        long_it_lines = MIN(long_it_lines, max_long_it_lines);
+        long_it_lines = MAX(long_it_lines, min_long_it_lines);
+        long_it = long_it_lines * one_line;
+    }
+
+    *o_long_it = long_it;
+    *o_long_gain = long_gain;
     *o_short_it = NewIntegrationTime;
-    *o_short_gain = _sensorGain2linear(_linear2sensorGain(NewGain));
+    *o_short_gain = short_gain;
+
+    TRACE(IMX715_DEBUG, "%s: ratio=%.1f vmax=%u fsc=%u rhs1=%u max_long_it_lines=%u\n",
+        __func__, hdr_ratio[0], vmax, fsc, rhs1, max_long_it_lines);
+    TRACE(IMX715_DEBUG, "%s: required_long_ev=%.6f long_it=%.6f(%u lines) long_gain=%.4f\n",
+        __func__, required_long_ev, long_it, long_it_lines, long_gain);
+    TRACE(IMX715_DEBUG, "%s: short_it=%.6f short_gain=%.4f\n",
+        __func__, *o_short_it, *o_short_gain);
 
     return RET_SUCCESS;
 }
@@ -2049,12 +2257,12 @@ RESULT IMX715_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
     TRACE(IMX715_INFO, "%s: enter with NewIntegrationTime: %f, NewGain: %f\n",
         __func__, NewIntegrationTime, NewGain);
     if (pIMX715Ctx == NULL) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }        
     if ((pNumberOfFramesToSkip == NULL) || (pSetGain == NULL) ||
         (pSetIntegrationTime == NULL)) {
-        printf("%s: Invalid parameter (NULL pointer detected)\n", __func__);
+        TRACE(IMX715_ERROR, "%s: Invalid parameter (NULL pointer detected)\n", __func__);
         return (RET_NULL_POINTER);
     }
 
@@ -2070,12 +2278,11 @@ RESULT IMX715_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
     // HDR has not been tested yet
     if (pIMX715Ctx->enableHdr) {
         result = IMX715_ReadRHS1(handle, &pIMX715Ctx->cur_rhs1);
-        result |= IMX715_ReadRHS2(handle, &pIMX715Ctx->cur_rhs2);
-        result |= IMX715_ReadHmax(handle, &hmax);
-        if (result != RET_SUCCESS) {
-            TRACE(IMX715_ERROR, "%s: Read RHS1, RHS2 or HMAX failed\n", __func__);
-            return result;
-        }
+        CHECK_RESULT_RET(result, "ReadRHS1");
+        result = IMX715_ReadRHS2(handle, &pIMX715Ctx->cur_rhs2);
+        CHECK_RESULT_RET(result, "ReadRHS2");
+        result = IMX715_ReadHmax(handle, &hmax);
+        CHECK_RESULT_RET(result, "ReadHmax");
 
         pIMX715Ctx->SensorMode.ae_info.one_line_exp_time_ns = (uint32_t)(((float)hmax / IMX715_PIXEL_CLK_RATE) * MICRO_2_NANO);
         pIMX715Ctx->one_line_exp_time =
@@ -2090,34 +2297,38 @@ RESULT IMX715_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
                                     &long_it, &short_it,
                                     &long_gain, &short_gain,
                                     hdr_ratio);
+            CHECK_RESULT_RET(result, "Calculate2DOLExposures");
         } else {
             //3exposure
             result = IMX715_Calculate3DOLExposures(handle, NewIntegrationTime, NewGain,
                                         &long_it, &short_it, &very_short_it,
                                         &long_gain, &short_gain, &very_short_gain,
                                         hdr_ratio);
-        }
-        if (result != RET_SUCCESS) {
-            TRACE(IMX715_ERROR, "%s: CalculateHDRExposures failed\n", __func__);
-            return result;
+            CHECK_RESULT_RET(result, "Calculate3DOLExposures");
         }
 
 		result = IMX715_IsiSetLEFIntegrationTimeIss(handle, long_it,
 							pSetIntegrationTime,
 							pNumberOfFramesToSkip,
 							hdr_ratio);
-		result |= IMX715_IsiSetLEFGainIss(handle, long_gain, pSetGain, hdr_ratio);        
-		result |= IMX715_IsiSetSEF1IntegrationTimeIss(
+		CHECK_RESULT_RET(result, "SetLEFIntegrationTime");
+		result = IMX715_IsiSetLEFGainIss(handle, long_gain, pSetGain, hdr_ratio);
+		CHECK_RESULT_RET(result, "SetLEFGain");
+		result = IMX715_IsiSetSEF1IntegrationTimeIss(
 			handle, short_it, pSetIntegrationTime,
 			pNumberOfFramesToSkip, hdr_ratio);
+		CHECK_RESULT_RET(result, "SetSEF1IntegrationTime");
 
-		result |= IMX715_IsiSetSEF1GainIss(handle, NewIntegrationTime,
+		result = IMX715_IsiSetSEF1GainIss(handle, NewIntegrationTime,
 						  short_gain, pSetGain, hdr_ratio);
-		result |= IMX715_IsiSetSEF2IntegrationTimeIss(
+		CHECK_RESULT_RET(result, "SetSEF1Gain");
+		result = IMX715_IsiSetSEF2IntegrationTimeIss(
 			handle, very_short_it, pSetIntegrationTime,
 			pNumberOfFramesToSkip, hdr_ratio);
-		result |= IMX715_IsiSetSEF2GainIss(handle, NewIntegrationTime,
+		CHECK_RESULT_RET(result, "SetSEF2IntegrationTime");
+		result = IMX715_IsiSetSEF2GainIss(handle, NewIntegrationTime,
 						  very_short_gain, pSetGain, hdr_ratio);
+		CHECK_RESULT_RET(result, "SetSEF2Gain");
 
         // Recalculate `io_hdr_ratio` according to the set values
         hdr_ratio[0] = (long_it * long_gain) / (short_it * short_gain);
@@ -2132,12 +2343,14 @@ RESULT IMX715_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
         TRACE(IMX715_DEBUG, "%s: actual hdr_ratio[0] = LS Ratio = %f, hdr_ratio[1] = VS Ratio = %f\n",
         __func__, hdr_ratio[0], hdr_ratio[1]);
     } else {
-        result |= IMX715_IsiSetLEFIntegrationTimeIss(handle, NewIntegrationTime,
+        result = IMX715_IsiSetLEFIntegrationTimeIss(handle, NewIntegrationTime,
                                                 pSetIntegrationTime,
                                                 pNumberOfFramesToSkip, hdr_ratio);
-        result |= IMX715_IsiSetLEFGainIss(handle, NewGain, pSetGain, hdr_ratio);
+        CHECK_RESULT_RET(result, "SetLEFIntegrationTime");
+        result = IMX715_IsiSetLEFGainIss(handle, NewGain, pSetGain, hdr_ratio);
+        CHECK_RESULT_RET(result, "SetLEFGain");
     }
-    return result;
+    return RET_SUCCESS;
 }
 
 RESULT IMX715_IsiExposureControlExpandedIss(
@@ -2145,14 +2358,18 @@ RESULT IMX715_IsiExposureControlExpandedIss(
     float NewIris, uint8_t* pNumberOfFramesToSkip, float* pSetGain,
     float* pSetIntegrationTime, float* pSetIris, float* hdr_ratio) {
 
+    RESULT result = RET_SUCCESS;
     if (pSetIris) {
-        IMX715_IsiSetIrisIss(handle, NewIris);
+        result = IMX715_IsiSetIrisIss(handle, NewIris);
+        CHECK_RESULT_RET(result, "SetIris");
         *pSetIris = NewIris;
     }
 
-    return IMX715_IsiExposureControlIss(handle, NewGain, NewIntegrationTime,
+    result = IMX715_IsiExposureControlIss(handle, NewGain, NewIntegrationTime,
                                         pNumberOfFramesToSkip, pSetGain,
                                         pSetIntegrationTime, hdr_ratio);
+    CHECK_RESULT_RET(result, "ExposureControl");
+    return result;
 }
 
 RESULT IMX715_IsiGetCurrentExposureIss(IsiSensorHandle_t handle,
@@ -2162,7 +2379,7 @@ RESULT IMX715_IsiGetCurrentExposureIss(IsiSensorHandle_t handle,
     RESULT result = RET_SUCCESS;
 
     if (pIMX715Ctx == NULL) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
 
@@ -2185,7 +2402,7 @@ RESULT IMX715_IsiGetFpsIss(IsiSensorHandle_t handle, uint32_t* pFps) {
     RESULT result = RET_SUCCESS;
 
     if (pIMX715Ctx == NULL) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        TRACE(IMX715_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
 
@@ -2206,7 +2423,7 @@ RESULT IMX715_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
     uint32_t requested_vmax = 0;
     uint32_t requested_fsc = 0;
     uint32_t shr = 0;
-    size_t dol = IMX715_GetNumExposures(pIMX715Ctx);
+    size_t dol = 0;
     uint32_t fsc = 0;
     uint32_t min_shr0 = (dol == 1) ? IMX715_MIN_SHR : IMX715_2DOL_SHR0_RHS1_GAP + pIMX715Ctx->cur_rhs1;
     int exp = 0;
@@ -2222,10 +2439,10 @@ RESULT IMX715_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
     if (pIMX715Ctx->enableHdr && (pIMX715Ctx->SensorMode.stitching_mode != SENSOR_STITCHING_L_AND_S)) {
         return RET_SUCCESS;
     }
-    if (dol == 0) {
-        TRACE(IMX715_ERROR, "%s: Invalid DOL value (%d)\n", __func__, (int)dol);
-        return RET_FAILURE;
-    }
+
+    result = IMX715_GetNumExposures(pIMX715Ctx, &dol);
+    CHECK_RESULT_RET(result, "GetNumExposures");
+
     if (flickerMode > ISI_AE_ANTIBANDING_MODE_AUTO) {
         TRACE(IMX715_INFO, "%s: Invalid flickerMode (%d), setting ISI_AE_ANTIBANDING_MODE_AUTO instead.\n", __func__, flickerMode);
         flickerMode = ISI_AE_ANTIBANDING_MODE_AUTO;
@@ -2233,10 +2450,7 @@ RESULT IMX715_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
     pIMX715Ctx->flicker_fps_mode = flickerMode;
 
     result = IMX715_ReadVmax(handle, &current_vmax);
-    if (result != RET_SUCCESS) {
-        TRACE(IMX715_ERROR, "%s: Unable to read VMAX\n", __func__);
-        return (result);
-    }
+    CHECK_RESULT_RET(result, "ReadVmax");
     if (pIMX715Ctx->original_vmax == 0) {
         pIMX715Ctx->original_vmax = current_vmax;
     }
@@ -2253,7 +2467,8 @@ RESULT IMX715_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
         pIMX715Ctx->unlimit_fps_vmax_changed = current_vmax > pIMX715Ctx->original_vmax && pIMX715Ctx->unlimit_fps;
     }
 
-    requested_vmax = IMX715_getNewVmaxAntiFlicker(pIMX715Ctx, current_vmax);
+    result = IMX715_getNewVmaxAntiFlicker(pIMX715Ctx, current_vmax, &requested_vmax);
+    CHECK_RESULT_RET(result, "getNewVmaxAntiFlicker");
     requested_vmax = MAX( MIN(requested_vmax, IMX715_VMAX_MAX), 1);
     requested_fsc = requested_vmax * dol;
 
@@ -2261,15 +2476,16 @@ RESULT IMX715_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
         shr = MAX( (int)requested_fsc - (int)fsc + (int)shr, min_shr0);
         TRACE(IMX715_DEBUG, "%s - writing 0x%x to VMAX, writing 0x%x to SHR0\n", __func__, requested_vmax, shr);
         
-        result |= IMX715_LockRegHold(handle);
-        result |= IMX715_WriteVmax(handle, requested_vmax);
-        result |= IMX715_WriteShr0(handle, shr);
-        result |= IMX715_UnlockRegHold(handle);
-        result |= IMX715_UpdateCurrLEFIntegrationTimeFromVmax(pIMX715Ctx, requested_vmax, shr);
-        if (result != RET_SUCCESS) {
-            TRACE(IMX715_ERROR, "%s: Unable to write VMAX or Shr0\n", __func__);
-            return (result);
-        }
+        result = IMX715_LockRegHold(handle);
+        CHECK_RESULT_RET(result, "LockRegHold");
+        result = IMX715_WriteVmax(handle, requested_vmax);
+        CHECK_RESULT_RET(result, "WriteVmax");
+        result = IMX715_WriteShr0(handle, shr);
+        CHECK_RESULT_RET(result, "WriteShr0");
+        result = IMX715_UnlockRegHold(handle);
+        CHECK_RESULT_RET(result, "UnlockRegHold");
+        result = IMX715_UpdateCurrLEFIntegrationTimeFromVmax(pIMX715Ctx, requested_vmax, shr);
+        CHECK_RESULT_RET(result, "UpdateCurrLEFIntegrationTimeFromVmax");
     }
 
     // these 2 are being used only in SDR
@@ -2320,8 +2536,10 @@ RESULT IMX715_IsiSetTpgIss(IsiSensorHandle_t handle, IsiTpg_t Tpg) {
 
     if (Tpg.enable == 0) {
         result = IMX715_IsiWriteRegIss(handle, 0x3253, 0x00);
+        CHECK_RESULT_RET(result, "disable test pattern");
     } else {
         result = IMX715_IsiWriteRegIss(handle, 0x3253, 0x80);
+        CHECK_RESULT_RET(result, "enable test pattern");
     }
 
     pIMX715Ctx->TestPattern = Tpg.enable;
@@ -2341,13 +2559,14 @@ RESULT IMX715_IsiGetTpgIss(IsiSensorHandle_t handle, IsiTpg_t* Tpg) {
 
     if (pIMX715Ctx->Configured != BOOL_TRUE) return RET_WRONG_STATE;
 
-    if (!IMX715_IsiReadRegIss(handle, 0x5081, &value)) {
-        Tpg->enable = ((value & 0x80) != 0) ? 1 : 0;
-        if (Tpg->enable) {
-            Tpg->pattern = (0xff & value);
-        }
-        pIMX715Ctx->TestPattern = Tpg->enable;
+    result = IMX715_IsiReadRegIss(handle, 0x5081, &value);
+    CHECK_RESULT_RET(result, "read TPG register");
+
+    Tpg->enable = ((value & 0x80) != 0) ? 1 : 0;
+    if (Tpg->enable) {
+        Tpg->pattern = (0xff & value);
     }
+    pIMX715Ctx->TestPattern = Tpg->enable;
 
     return (result);
 }
@@ -2388,23 +2607,27 @@ RESULT IMX715_IsiSetAgainDgainIss(IsiSensorHandle_t handle,
     }
 
     if ((Gain.again < 1) | (Gain.again > 16)) {
-        TRACE(IMX715_ERROR, "%s: Invalid sensor again\n", __func__);
+        TRACE(IMX715_ERROR, "%s: Invalid sensor again (%f)\n", __func__, Gain.again);
         return (RET_OUTOFRANGE);
     }
     // Again = (uint32_t)(1024 - (1024/Gain.again));
     Again = (uint32_t)(((2048 * Gain.again) - 2048) / Gain.again);
 
     result = IMX715_IsiWriteRegIss(handle, 0x309c, (Again & 0x0000FF));
+    CHECK_RESULT_RET(result, "write again low");
     result = IMX715_IsiWriteRegIss(handle, 0x309d, (Again & 0x00FF00) >> 8);
+    CHECK_RESULT_RET(result, "write again high");
 
     if ((Gain.dgain < 1) | (Gain.dgain > 16)) {
-        TRACE(IMX715_ERROR, "%s: Invalid sensor dgain\n", __func__);
+        TRACE(IMX715_ERROR, "%s: Invalid sensor dgain (%f)\n", __func__, Gain.dgain);
         return (RET_OUTOFRANGE);
     }
     Dgain = Gain.dgain * 256;
 
     result = IMX715_IsiWriteRegIss(handle, 0x308c, (Dgain & 0x0000FF));
+    CHECK_RESULT_RET(result, "write dgain low");
     result = IMX715_IsiWriteRegIss(handle, 0x308d, (Dgain & 0x00FF00) >> 8);
+    CHECK_RESULT_RET(result, "write dgain high");
 
     TRACE(IMX715_DEBUG, "%s: (exit)\n", __func__);
     return (result);
@@ -2507,7 +2730,7 @@ static RESULT IMX715_IsiGetHdrBlankingLinesIss(IsiSensorHandle_t handle,
     IMX715_Context_t* pIMX715Ctx = (IMX715_Context_t*)handle;
     HalContext_t* pHalCtx = (HalContext_t*)pIMX715Ctx->IsiCtx.HalHandle;
     RESULT result = RET_SUCCESS;
-    uint32_t rhs1 = 0, rhs2 = 0;
+    int32_t rhs1 = 0, rhs2 = 0;
 
     if (elementCount != 2) {
         TRACE(IMX715_ERROR, "%s: Invalid element count %zu, expected 2\n",
@@ -2515,16 +2738,13 @@ static RESULT IMX715_IsiGetHdrBlankingLinesIss(IsiSensorHandle_t handle,
         return RET_OUTOFRANGE;
     }
 
-    rhs1 = IMX715_GetCtrl(pHalCtx->sensor_fd, IMX715_CID_RHS1);
-    rhs2 = IMX715_GetCtrl(pHalCtx->sensor_fd, IMX715_CID_RHS2);
-
-    if (rhs1 < 0 || rhs2 < 0) {
-        TRACE(IMX715_ERROR, "%s: Unable to read RHS1 or RHS2, result: %d\n",
-              __func__, result);
-        return RET_FAILURE;
-    }
+    result = IMX715_GetCtrl(pHalCtx->sensor_fd, IMX715_CID_RHS1, &rhs1);
+    CHECK_RESULT_RET(result, "GetCtrl RHS1");
+    result = IMX715_GetCtrl(pHalCtx->sensor_fd, IMX715_CID_RHS2, &rhs2);
+    CHECK_RESULT_RET(result, "GetCtrl RHS2");
 
     result = IMX715_CalculateHdrBlankingLines(handle, pBlankingLines, rhs1, rhs2);
+    CHECK_RESULT_RET(result, "CalculateHdrBlankingLines");
     return result;
 }
 
