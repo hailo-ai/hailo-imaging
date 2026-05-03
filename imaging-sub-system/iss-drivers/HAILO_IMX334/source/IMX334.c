@@ -48,6 +48,8 @@ CREATE_TRACER(IMX334_DEBUG, "IMX334: ", INFO, 1)
 CREATE_TRACER(IMX334_REG_INFO, "IMX334: ", INFO, 1)
 CREATE_TRACER(IMX334_REG_DEBUG, "IMX334: ", INFO, 1)
 
+#define LOG_ERROR(...) TRACE(IMX334_ERROR, __VA_ARGS__)
+
 #include <fcntl.h>
 #include <linux/v4l2-subdev.h>
 #include <linux/videodev2.h>
@@ -124,11 +126,13 @@ static RESULT IMX334_IsiCreateIss(IsiSensorInstanceConfig_t *pConfig) {
     }
 
     MEMSET(pIMX334Ctx, 0, sizeof(IMX334_Context_t));
+    pIMX334Ctx->i2c_fd = -1;
+    pIMX334Ctx->i2c_af_fd = -1;
+
     result = HalAddRef(pConfig->HalHandle);
     if (result != RET_SUCCESS) {
-        free(pIMX334Ctx);
-        pIMX334Ctx = NULL;
-        return (result);
+        TRACE(IMX334_ERROR, "%s: HalAddRef failed (result=%d)\n", __func__, result);
+        goto error_free_ctx;
     }
 
     pIMX334Ctx->IsiCtx.HalHandle = pConfig->HalHandle;
@@ -154,14 +158,15 @@ static RESULT IMX334_IsiCreateIss(IsiSensorInstanceConfig_t *pConfig) {
     sprintf(i2c_file_path, "/dev/i2c-%d", pConfig->I2cBusNum);
     pIMX334Ctx->i2c_fd = open(i2c_file_path, O_RDWR);
     if (pIMX334Ctx->i2c_fd < 0) {
-        TRACE(IMX334_INFO, "unable to open /dev/i2c-%d\n", pConfig->I2cBusNum);
-        return RET_FAILURE;
+        TRACE(IMX334_ERROR, "%s: unable to open /dev/i2c-%d, errno=%d (%s)\n",
+              __func__, pConfig->I2cBusNum, errno, strerror(errno));
+        goto error_hal_del_ref;
     }
 
     if (ioctl(pIMX334Ctx->i2c_fd, I2C_SLAVE_FORCE, pIMX334Ctx->i2c_addr) < 0) {
-        TRACE(IMX334_INFO, "unable to set I2C_SLAVE_FORCE on /dev/i2c-%d\n",
-              pConfig->I2cBusNum);
-        return RET_FAILURE;
+        TRACE(IMX334_ERROR, "%s: unable to set I2C_SLAVE_FORCE on /dev/i2c-%d, errno=%d (%s)\n",
+              __func__, pConfig->I2cBusNum, errno, strerror(errno));
+        goto error_close_i2c_fd;
     }
 
     if (pConfig->I2cAfBusNum < 0) {
@@ -171,24 +176,40 @@ static RESULT IMX334_IsiCreateIss(IsiSensorInstanceConfig_t *pConfig) {
         sprintf(i2c_file_path, "/dev/i2c-%d", pConfig->I2cAfBusNum);
         pIMX334Ctx->i2c_af_fd = open(i2c_file_path, O_RDWR);
         if (pIMX334Ctx->i2c_af_fd < 0) {
-            TRACE(IMX334_INFO, "unable to open /dev/i2c-%d\n",
-                  pConfig->I2cAfBusNum);
-            return RET_FAILURE;
+            TRACE(IMX334_ERROR, "%s: unable to open /dev/i2c-%d (AF), errno=%d (%s)\n",
+                  __func__, pConfig->I2cAfBusNum, errno, strerror(errno));
+            goto error_close_i2c_fd;
         }
         pIMX334Ctx->SensorMode.af_mode = ISI_SENSOR_AF_MODE_CDAF;
     }
-    return (result);
+
+    return RET_SUCCESS;
+
+error_close_i2c_fd:
+    close(pIMX334Ctx->i2c_fd);
+error_hal_del_ref:
+    (void)HalDelRef(pIMX334Ctx->IsiCtx.HalHandle);
+error_free_ctx:
+    free(pIMX334Ctx);
+    pIMX334Ctx = NULL;
+    return RET_FAILURE;
 }
 
 static RESULT IMX334_IsiReleaseIss(IsiSensorHandle_t handle) {
     IMX334_Context_t *pIMX334Ctx = (IMX334_Context_t *)handle;
     RESULT result = RET_SUCCESS;
+    RESULT cur_result = RET_SUCCESS;
 
     if (pIMX334Ctx == NULL) return (RET_WRONG_HANDLE);
 
-    (void)IMX334_IsiSetStreamingIss(pIMX334Ctx, BOOL_FALSE);
-    (void)IMX334_IsiSetPowerIss(pIMX334Ctx, BOOL_FALSE);
+    cur_result = IMX334_IsiSetStreamingIss(pIMX334Ctx, BOOL_FALSE);
+    UPDATE_RESULT_LOG(result, cur_result, "SetStreaming off");
+    cur_result = IMX334_IsiSetPowerIss(pIMX334Ctx, BOOL_FALSE);
+    UPDATE_RESULT_LOG(result, cur_result, "SetPower off");
     (void)HalDelRef(pIMX334Ctx->IsiCtx.HalHandle);
+    if (pIMX334Ctx->i2c_af_fd >= 0) {
+        close(pIMX334Ctx->i2c_af_fd);
+    }
     close(pIMX334Ctx->i2c_fd);
     MEMSET(pIMX334Ctx, 0, sizeof(IMX334_Context_t));
     free(pIMX334Ctx);
@@ -204,6 +225,7 @@ static RESULT IMX334_IsiReadRegIss(IsiSensorHandle_t handle,
     unsigned char out[IMX334_TRANSFER_BUFFER_LENGTH];
     struct i2c_msg msgs[2];
     uint8_t addr_buf[2] = { (Addr >> 8) & 0xff, Addr & 0xff };
+    int ret = 0;
 
     if (pIMX334Ctx == NULL) {
         return (RET_WRONG_HANDLE);
@@ -222,7 +244,10 @@ static RESULT IMX334_IsiReadRegIss(IsiSensorHandle_t handle,
     ioctl_data.msgs = msgs;
     ioctl_data.nmsgs = 2;
 
-    if (ioctl(pIMX334Ctx->i2c_fd, I2C_RDWR, &ioctl_data) < 0) {
+    ret = ioctl(pIMX334Ctx->i2c_fd, I2C_RDWR, &ioctl_data);
+    if (ret < 0) {
+        TRACE(IMX334_ERROR, "%s: ioctl I2C_RDWR failed, errno=%d (%s). ret = %d\n",
+              __func__, errno, strerror(errno), ret);
         return RET_FAILURE;
     }
 
@@ -235,6 +260,7 @@ static RESULT IMX334_IsiWriteRegIss(IsiSensorHandle_t handle,
                                     const uint32_t Addr, const uint32_t Value) {
     RESULT result = RET_SUCCESS;
     char out[IMX334_TRANSFER_BUFFER_LENGTH];
+    ssize_t write_ret;
 
     IMX334_Context_t *pIMX334Ctx = (IMX334_Context_t *)handle;
     if (pIMX334Ctx == NULL) {
@@ -245,15 +271,28 @@ static RESULT IMX334_IsiWriteRegIss(IsiSensorHandle_t handle,
     out[0] = (Addr >> 8) & 0xff;
     out[1] = Addr & 0xff;
     out[2] = Value;
-    if (write(pIMX334Ctx->i2c_fd, out, sizeof(out)) != sizeof(out))
-        result = RET_FAILURE;
+    write_ret = write(pIMX334Ctx->i2c_fd, out, sizeof(out));
+    if (write_ret != sizeof(out)) {
+        if (write_ret < 0) {
+            TRACE(IMX334_ERROR, "%s: I2C write failed with error %d (%s)\n",
+                  __func__, errno, strerror(errno));
+        } else {
+            TRACE(IMX334_ERROR, "%s: I2C write incomplete. Wrote %zd of %zu bytes\n",
+                  __func__, write_ret, sizeof(out));
+        }
+        return RET_FAILURE;
+    }
     return (result);
 }
 
 static RESULT IMX334_UpdateFps(IMX334_Context_t *pIMX334Ctx, uint32_t vmax) {
     float frame_time = 0;
     frame_time = (vmax * pIMX334Ctx->one_line_exp_time);
-    if (frame_time == 0) return RET_FAILURE;
+    if (frame_time == 0) {
+        TRACE(IMX334_ERROR, "%s: frame_time is 0, vmax=%u, one_line_exp_time=%f\n",
+              __func__, vmax, pIMX334Ctx->one_line_exp_time);
+        return RET_FAILURE;
+    }
 
     pIMX334Ctx->CurrFps = (uint32_t)(ceil(1 / frame_time)) * ISI_FPS_ACCURACY;
     return RET_SUCCESS;
@@ -264,49 +303,60 @@ static RESULT IMX334_ReadVmax(IsiSensorHandle_t handle, uint32_t *vmax) {
     RESULT result;
 
     result = IMX334_IsiReadRegIss(handle, 0x3030, &vmax_low);
-    result |= IMX334_IsiReadRegIss(handle, 0x3031, &vmax_mid);
-    result |= IMX334_IsiReadRegIss(handle, 0x3032, &vmax_high);
-    if (result) return RET_FAILURE;
+    CHECK_RESULT_RET(result, "ReadVmax low");
+    result = IMX334_IsiReadRegIss(handle, 0x3031, &vmax_mid);
+    CHECK_RESULT_RET(result, "ReadVmax mid");
+    result = IMX334_IsiReadRegIss(handle, 0x3032, &vmax_high);
+    CHECK_RESULT_RET(result, "ReadVmax high");
+
     *vmax = (vmax_high << 16) | (vmax_mid << 8) | vmax_low;
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX334_WriteVmax(IsiSensorHandle_t handle, uint32_t vmax) {
     RESULT result;
 
     result = IMX334_IsiWriteRegIss(handle, 0x3030, vmax & 0xff);
-    result |= IMX334_IsiWriteRegIss(handle, 0x3031, (vmax >> 8) & 0xff);
-    result |= IMX334_IsiWriteRegIss(handle, 0x3032, (vmax >> 16) & 0x0f);
-    if (!result) {
-        return IMX334_UpdateFps((IMX334_Context_t *)handle, vmax);
-    }
-    return result;
+    CHECK_RESULT_RET(result, "WriteVmax low");
+    result = IMX334_IsiWriteRegIss(handle, 0x3031, (vmax >> 8) & 0xff);
+    CHECK_RESULT_RET(result, "WriteVmax mid");
+    result = IMX334_IsiWriteRegIss(handle, 0x3032, (vmax >> 16) & 0x0f);
+    CHECK_RESULT_RET(result, "WriteVmax high");
+
+    result = IMX334_UpdateFps((IMX334_Context_t *)handle, vmax);
+    CHECK_RESULT_RET(result, "UpdateFps");
+    return RET_SUCCESS;
 }
 
 static RESULT IMX334_WriteShr(IsiSensorHandle_t handle, uint32_t shr) {
     RESULT result;
 
     result = IMX334_IsiWriteRegIss(handle, 0x3058, (shr & 0xff));
+    CHECK_RESULT_RET(result, "WriteShr low");
     result = IMX334_IsiWriteRegIss(handle, 0x3059, (shr >> 8) & 0xff);
+    CHECK_RESULT_RET(result, "WriteShr mid");
     result = IMX334_IsiWriteRegIss(handle, 0x305a, (shr >> 16) & 0x0f);
+    CHECK_RESULT_RET(result, "WriteShr high");
 
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX334_LockRegHold(IsiSensorHandle_t handle) {
     RESULT result;
 
     result = IMX334_IsiWriteRegIss(handle, 0x3001, 0x1);
+    CHECK_RESULT_RET(result, "LockRegHold");
 
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX334_UnlockRegHold(IsiSensorHandle_t handle) {
     RESULT result;
 
     result = IMX334_IsiWriteRegIss(handle, 0x3001, 0x0);
+    CHECK_RESULT_RET(result, "UnlockRegHold");
 
-    return result;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX334_IsiGetModeIss(IsiSensorHandle_t handle, IsiMode_t *pMode) {
@@ -327,12 +377,15 @@ static RESULT IMX334_IsiSetModeIss(IsiSensorHandle_t handle, IsiMode_t *pMode) {
 
     IMX334_Context_t *pIMX334Ctx = (IMX334_Context_t *)handle;
     if (pIMX334Ctx == NULL) {
+        TRACE(IMX334_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
     HalContext_t *pHalCtx = (HalContext_t *)pIMX334Ctx->IsiCtx.HalHandle;
 
     ret = ioctl(pHalCtx->sensor_fd, VVSENSORIOC_S_SENSOR_MODE, pMode);
     if (ret != 0) {
+        TRACE(IMX334_ERROR, "%s: ioctl VVSENSORIOC_S_SENSOR_MODE failed, errno=%d (%s). ret = %d\n",
+              __func__, errno, strerror(errno), ret);
         return (RET_FAILURE);
     }
 
@@ -372,10 +425,7 @@ static RESULT IMX334_IsiEnumModeIss(IsiSensorHandle_t handle,
 
     HalContext_t *pHalCtx = (HalContext_t *)pIMX334Ctx->IsiCtx.HalHandle;
     result = IMX334_IsiHalEnumModeIss(pHalCtx, pEnumMode);
-    if (result != RET_SUCCESS) {
-        TRACE(IMX334_ERROR, "%s: sensor enum mode error!\n", __func__);
-        return (RET_FAILURE);
-    }
+    CHECK_RESULT_RET(result, "sensor enum mode");
 
     return result;
 }
@@ -393,7 +443,10 @@ static RESULT IMX334_IsiGetCapsIss(IsiSensorHandle_t handle, IsiCaps_t *pCaps) {
         return (RET_NULL_POINTER);
     }
 
-    if (!pIMX334Ctx->Configured) IMX334_IsiSetupIss(handle, pCaps);
+    if (!pIMX334Ctx->Configured) {
+        result = IMX334_IsiSetupIss(handle, pCaps);
+        CHECK_RESULT_RET(result, "Setup");
+    }
 
     pCaps->BusWidth = pIMX334Ctx->SensorMode.bit_width;
     pCaps->Mode = ISI_MODE_BAYER;
@@ -531,16 +584,11 @@ static RESULT IMX334_IsiSetupIss(IsiSensorHandle_t handle,
 
     memcpy(&pIMX334Ctx->CapsConfig, pCaps, sizeof(pIMX334Ctx->CapsConfig));
 
-    /* 1.) SW reset of image sensor (via I2C register interface)  be careful,
-     * bits 6..0 are reserved, reset bit is not sticky */
-    TRACE(IMX334_DEBUG, "%s: IMX334 System-Reset executed\n", __func__);
-    osSleep(100);
+    /* SW reset comment preserved - no actual reset code was present,
+     * and the 100ms sleep was unnecessary (no hardware access in this function). */
 
     result = IMX334_AecSetModeParameters(pIMX334Ctx, pCaps);
-    if (result != RET_SUCCESS) {
-        TRACE(IMX334_ERROR, "%s: SetupOutputWindow failed.\n", __func__);
-        return (result);
-    }
+    CHECK_RESULT_RET(result, "AecSetModeParameters");
 
     pIMX334Ctx->Configured = BOOL_TRUE;
     TRACE(IMX334_INFO, "%s: (exit)\n", __func__);
@@ -576,10 +624,12 @@ static RESULT IMX334_IsiGetRevisionIss(IsiSensorHandle_t handle,
     } else {
         reg_val = 0;
         result = IMX334_IsiReadRegIss(handle, 0x3a04, &reg_val);
+        CHECK_RESULT_RET(result, "read sensor ID high");
         sensor_id = (reg_val & 0xff) << 8;
 
         reg_val = 0;
-        result |= IMX334_IsiReadRegIss(handle, 0x3a05, &reg_val);
+        result = IMX334_IsiReadRegIss(handle, 0x3a05, &reg_val);
+        CHECK_RESULT_RET(result, "read sensor ID low");
         sensor_id |= (reg_val & 0xff);
     }
 
@@ -609,22 +659,23 @@ static inline int IMX334_getFlickerPeaksPerSec(IsiSensorAntibandingMode_t mode) 
     }
     return 0; // Default to 0 if mode not found
 }
-static inline uint32_t IMX334_getNewVmaxAntiFlicker(IMX334_Context_t *pIMX334Ctx, uint32_t requestedVmax) {
+static inline RESULT IMX334_getNewVmaxAntiFlicker(IMX334_Context_t *pIMX334Ctx, uint32_t requestedVmax, uint32_t *outClosestVmax) {
     uint32_t closestVmax = requestedVmax;
     int peaks = 0;
     int difference = INT_MAX;
     int minDifference = INT_MAX;
     if (!pIMX334Ctx) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
-        return (-1);
+        TRACE(IMX334_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        return RET_FAILURE;
     }
     peaks = IMX334_getFlickerPeaksPerSec(pIMX334Ctx->flicker_fps_mode);
     if (peaks == 0) {
         // No anti-flicker mode, return requested or original Vmax
         if (pIMX334Ctx->unlimit_fps && pIMX334Ctx->unlimit_fps_vmax_changed)
-            return requestedVmax;
+            *outClosestVmax = requestedVmax;
         else
-            return pIMX334Ctx->original_vmax; 
+            *outClosestVmax = pIMX334Ctx->original_vmax;
+        return RET_SUCCESS;
     }
     for (int i = 1; i < peaks; ++i) {
         uint32_t candidateVmax = i / (peaks * pIMX334Ctx->one_line_exp_time);
@@ -640,7 +691,8 @@ static inline uint32_t IMX334_getNewVmaxAntiFlicker(IMX334_Context_t *pIMX334Ctx
             break;
         }
     }
-    return closestVmax;
+    *outClosestVmax = closestVmax;
+    return RET_SUCCESS;
 }
 
 static RESULT IMX334_IsiUnlimitFpsIss(IsiSensorHandle_t handle,
@@ -675,7 +727,8 @@ static RESULT IMX334_IsiLimitFpsIss(IsiSensorHandle_t handle) {
     if (!pIMX334Ctx) {
         return RET_NULL_POINTER;
     }
-    IMX334_ReadVmax(handle, &current_vmax);
+    result = IMX334_ReadVmax(handle, &current_vmax);
+    CHECK_RESULT_RET(result, "ReadVmax");
     if (current_vmax == 0) {
         TRACE(IMX334_INFO, "%s - exit because current_vmax is 0\n", __func__);
         return result;
@@ -688,13 +741,17 @@ static RESULT IMX334_IsiLimitFpsIss(IsiSensorHandle_t handle) {
 
     new_vmax = pIMX334Ctx->original_vmax;
     if (pIMX334Ctx->flicker_fps_mode != ISI_AE_ANTIBANDING_MODE_OFF) {
-        new_vmax = IMX334_getNewVmaxAntiFlicker(pIMX334Ctx, pIMX334Ctx->original_vmax);
+        result = IMX334_getNewVmaxAntiFlicker(pIMX334Ctx, pIMX334Ctx->original_vmax, &new_vmax);
+        CHECK_RESULT_RET(result, "getNewVmaxAntiFlicker");
         TRACE(IMX334_DEBUG, "%s -Anti Flicker Fps mode %d, set new vmax %u\n", __func__, pIMX334Ctx->flicker_fps_mode, new_vmax);
     }
     if (current_vmax != new_vmax) {
-        result |= IMX334_LockRegHold(handle);
-        result |= IMX334_WriteVmax(handle, new_vmax);
-        result |= IMX334_UnlockRegHold(handle);
+        result = IMX334_LockRegHold(handle);
+        CHECK_RESULT_RET(result, "LockRegHold");
+        result = IMX334_WriteVmax(handle, new_vmax);
+        CHECK_RESULT_RET(result, "WriteVmax");
+        result = IMX334_UnlockRegHold(handle);
+        CHECK_RESULT_RET(result, "UnlockRegHold");
 
         int shr = MAX((int)current_vmax - (int)(pIMX334Ctx->AecCurIntegrationTime / pIMX334Ctx->one_line_exp_time), IMX334_MIN_SHR);
         float configuredIntegrationTime = (new_vmax - shr) * pIMX334Ctx->one_line_exp_time;
@@ -945,15 +1002,15 @@ RESULT IMX334_IsiSetGainIss(IsiSensorHandle_t handle, float NewGain,
 
     uint32_t Gain = _linear2sensorGain(NewGain);
     if (old_gain_log == Gain) return RET_SUCCESS;
-    result = IMX334_IsiWriteRegIss(handle, 0x3001, 0x01);
+    result = IMX334_LockRegHold(handle);
+    CHECK_RESULT_RET(result, "LockRegHold");
     result = IMX334_IsiWriteRegIss(handle, 0x30e8, (Gain & 0x00ff));
+    CHECK_RESULT_RET(result, "write gain low");
     result = IMX334_IsiWriteRegIss(handle, 0x30e9, (Gain & 0x0700) >> 8);
-    result = IMX334_IsiWriteRegIss(handle, 0x3001, 0x00);
+    CHECK_RESULT_RET(result, "write gain high");
+    result = IMX334_UnlockRegHold(handle);
+    CHECK_RESULT_RET(result, "UnlockRegHold");
     pIMX334Ctx->OldGain = NewGain;
-
-    if (result != 0) {
-        return RET_FAILURE;
-    }
 
     pIMX334Ctx->AecCurGain = _sensorGain2linear(Gain);
 
@@ -981,7 +1038,7 @@ RESULT IMX334_IsiGetIntegrationTimeIss(IsiSensorHandle_t handle,
     RESULT result = RET_SUCCESS;
 
     if (!pIMX334Ctx) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        TRACE(IMX334_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
 
@@ -996,7 +1053,7 @@ RESULT IMX334_IsiGetSEF1IntegrationTimeIss(IsiSensorHandle_t handle,
     RESULT result = RET_SUCCESS;
 
     if (!pIMX334Ctx) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        TRACE(IMX334_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
     if (!pSetIntegrationTime) return (RET_NULL_POINTER);
@@ -1011,7 +1068,7 @@ RESULT IMX334_IsiGetIntegrationTimeIncrementIss(IsiSensorHandle_t handle,
     RESULT result = RET_SUCCESS;
 
     if (!pIMX334Ctx) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        TRACE(IMX334_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
 
@@ -1039,12 +1096,12 @@ RESULT IMX334_IsiSetIntegrationTimeIss(IsiSensorHandle_t handle,
     uint32_t vmax_updated = 0;
     uint32_t current_vmax = 0;
     if (!pIMX334Ctx) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        TRACE(IMX334_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
 
     if (!pSetIntegrationTime || !pNumberOfFramesToSkip) {
-        printf("%s: Invalid parameter (NULL pointer detected)\n", __func__);
+        TRACE(IMX334_ERROR, "%s: Invalid parameter (NULL pointer detected)\n", __func__);
         return (RET_NULL_POINTER);
     }
 
@@ -1064,7 +1121,8 @@ RESULT IMX334_IsiSetIntegrationTimeIss(IsiSensorHandle_t handle,
             return RET_FAILURE;
         }
 
-        if (IMX334_ReadVmax(handle, &current_vmax)) return RET_FAILURE;
+        result = IMX334_ReadVmax(handle, &current_vmax);
+        CHECK_RESULT_RET(result, "ReadVmax");
 
         if (pIMX334Ctx->original_vmax == 0)
             pIMX334Ctx->original_vmax = current_vmax;
@@ -1088,7 +1146,8 @@ RESULT IMX334_IsiSetIntegrationTimeIss(IsiSensorHandle_t handle,
             pIMX334Ctx->unlimit_fps_vmax_changed = new_vmax > pIMX334Ctx->original_vmax && pIMX334Ctx->unlimit_fps;
     
             if (pIMX334Ctx->flicker_fps_mode != ISI_AE_ANTIBANDING_MODE_OFF) {
-                new_vmax = IMX334_getNewVmaxAntiFlicker(pIMX334Ctx, new_vmax);
+                result = IMX334_getNewVmaxAntiFlicker(pIMX334Ctx, new_vmax, &new_vmax);
+                CHECK_RESULT_RET(result, "getNewVmaxAntiFlicker");
                 TRACE(IMX334_DEBUG, "%s -Anti Flicker Fps mode %d, set new vmax %u\n", __func__, pIMX334Ctx->flicker_fps_mode, new_vmax);
             }
             
@@ -1099,12 +1158,16 @@ RESULT IMX334_IsiSetIntegrationTimeIss(IsiSensorHandle_t handle,
             new_vmax = current_vmax;
         }
 
-        result |= IMX334_LockRegHold(handle);
+        result = IMX334_LockRegHold(handle);
+        CHECK_RESULT_RET(result, "LockRegHold");
         if (vmax_updated && pIMX334Ctx->unlimit_fps) {
-            IMX334_WriteVmax(handle, new_vmax);
+            result = IMX334_WriteVmax(handle, new_vmax);
+            CHECK_RESULT_RET(result, "WriteVmax");
         }
-        result |= IMX334_WriteShr(handle, shr);
-        result |= IMX334_UnlockRegHold(handle);
+        result = IMX334_WriteShr(handle, shr);
+        CHECK_RESULT_RET(result, "WriteShr");
+        result = IMX334_UnlockRegHold(handle);
+        CHECK_RESULT_RET(result, "UnlockRegHold");
 
         float configuredIntegrationTime = (new_vmax - shr) * pIMX334Ctx->one_line_exp_time;
         pIMX334Ctx->OldIntegrationTime = configuredIntegrationTime;
@@ -1138,13 +1201,13 @@ RESULT IMX334_IsiExposureControlExpandedIss(
     RESULT result = RET_SUCCESS;
 
     if (pIMX334Ctx == NULL) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        TRACE(IMX334_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
 
     if ((pNumberOfFramesToSkip == NULL) || (pSetGain == NULL) ||
         (pSetIntegrationTime == NULL)) {
-        printf("%s: Invalid parameter (NULL pointer detected)\n", __func__);
+        TRACE(IMX334_ERROR, "%s: Invalid parameter (NULL pointer detected)\n", __func__);
         return (RET_NULL_POINTER);
     }
 
@@ -1152,13 +1215,17 @@ RESULT IMX334_IsiExposureControlExpandedIss(
         result = IMX334_IsiSetSEF1IntegrationTimeIss(
             handle, NewIntegrationTime, pSetIntegrationTime,
             pNumberOfFramesToSkip, hdr_ratio);
+        CHECK_RESULT_RET(result, "SetSEF1IntegrationTime");
         result = IMX334_IsiSetSEF1GainIss(handle, NewIntegrationTime, NewGain,
                                           pSetGain, hdr_ratio);
+        CHECK_RESULT_RET(result, "SetSEF1Gain");
     }
     result = IMX334_IsiSetIntegrationTimeIss(handle, NewIntegrationTime,
                                              pSetIntegrationTime,
                                              pNumberOfFramesToSkip, hdr_ratio);
+    CHECK_RESULT_RET(result, "SetIntegrationTime");
     result = IMX334_IsiSetGainIss(handle, NewGain, pSetGain, hdr_ratio);
+    CHECK_RESULT_RET(result, "SetGain");
     return result;
 }
 
@@ -1172,13 +1239,13 @@ RESULT IMX334_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
     RESULT result = RET_SUCCESS;
 
     if (pIMX334Ctx == NULL) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        TRACE(IMX334_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
 
     if ((pNumberOfFramesToSkip == NULL) || (pSetGain == NULL) ||
         (pSetIntegrationTime == NULL)) {
-        printf("%s: Invalid parameter (NULL pointer detected)\n", __func__);
+        TRACE(IMX334_ERROR, "%s: Invalid parameter (NULL pointer detected)\n", __func__);
         return (RET_NULL_POINTER);
     }
 
@@ -1186,13 +1253,17 @@ RESULT IMX334_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
         result = IMX334_IsiSetSEF1IntegrationTimeIss(
             handle, NewIntegrationTime, pSetIntegrationTime,
             pNumberOfFramesToSkip, hdr_ratio);
+        CHECK_RESULT_RET(result, "SetSEF1IntegrationTime");
         result = IMX334_IsiSetSEF1GainIss(handle, NewIntegrationTime, NewGain,
                                           pSetGain, hdr_ratio);
+        CHECK_RESULT_RET(result, "SetSEF1Gain");
     }
     result = IMX334_IsiSetIntegrationTimeIss(handle, NewIntegrationTime,
                                              pSetIntegrationTime,
                                              pNumberOfFramesToSkip, hdr_ratio);
+    CHECK_RESULT_RET(result, "SetIntegrationTime");
     result = IMX334_IsiSetGainIss(handle, NewGain, pSetGain, hdr_ratio);
+    CHECK_RESULT_RET(result, "SetGain");
     return result;
 }
 
@@ -1203,7 +1274,7 @@ RESULT IMX334_IsiGetCurrentExposureIss(IsiSensorHandle_t handle,
     RESULT result = RET_SUCCESS;
 
     if (pIMX334Ctx == NULL) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        TRACE(IMX334_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
 
@@ -1221,7 +1292,7 @@ RESULT IMX334_IsiGetFpsIss(IsiSensorHandle_t handle, uint32_t *pFps) {
     RESULT result = RET_SUCCESS;
 
     if (pIMX334Ctx == NULL) {
-        printf("%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
+        TRACE(IMX334_ERROR, "%s: Invalid sensor handle (NULL pointer detected)\n", __func__);
         return (RET_WRONG_HANDLE);
     }
 
@@ -1257,10 +1328,7 @@ RESULT IMX334_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
     }
     pIMX334Ctx->flicker_fps_mode = flickerMode;
     result = IMX334_ReadVmax(handle, &current_vmax);
-    if (result != RET_SUCCESS) {
-        TRACE(IMX334_ERROR, "%s: Unable to read VMAX\n", __func__);
-        return (result);
-    }
+    CHECK_RESULT_RET(result, "ReadVmax");
     if (pIMX334Ctx->original_vmax == 0) {
         pIMX334Ctx->original_vmax = current_vmax;
     }
@@ -1273,19 +1341,20 @@ RESULT IMX334_IsiSetFlickerFpsIss(IsiSensorHandle_t handle, uint32_t flickerMode
         pIMX334Ctx->unlimit_fps_vmax_changed = current_vmax > pIMX334Ctx->original_vmax && pIMX334Ctx->unlimit_fps;
     }
 
-    requested_vmax = IMX334_getNewVmaxAntiFlicker(pIMX334Ctx, current_vmax);
+    result = IMX334_getNewVmaxAntiFlicker(pIMX334Ctx, current_vmax, &requested_vmax);
+    CHECK_RESULT_RET(result, "getNewVmaxAntiFlicker");
     requested_vmax = MAX( MIN(requested_vmax, IMX334_VMAX_MAX), 1);
     
     if (current_vmax != requested_vmax) {
         shr = MAX( (int)requested_vmax - (int)current_vmax + (int)shr , IMX334_MIN_SHR);
-        result |= IMX334_LockRegHold(handle);
-        result |= IMX334_WriteVmax(handle, requested_vmax);
-        result |= IMX334_WriteShr(handle, shr);
-        result |= IMX334_UnlockRegHold(handle);
-        if (result != RET_SUCCESS) {
-            TRACE(IMX334_ERROR, "%s: Unable to write VMAX or Shr0\n", __func__);
-            return (result);
-        }
+        result = IMX334_LockRegHold(handle);
+        CHECK_RESULT_RET(result, "LockRegHold");
+        result = IMX334_WriteVmax(handle, requested_vmax);
+        CHECK_RESULT_RET(result, "WriteVmax");
+        result = IMX334_WriteShr(handle, shr);
+        CHECK_RESULT_RET(result, "WriteShr");
+        result = IMX334_UnlockRegHold(handle);
+        CHECK_RESULT_RET(result, "UnlockRegHold");
         TRACE(IMX334_DEBUG, "%s - writing 0x%x to VMAX, writing 0x%x to SHR0\n", __func__, requested_vmax, shr);
         float configuredIntegrationTime = (requested_vmax - shr) * pIMX334Ctx->one_line_exp_time;
         pIMX334Ctx->OldIntegrationTime = configuredIntegrationTime;
