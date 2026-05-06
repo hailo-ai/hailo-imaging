@@ -26,6 +26,7 @@ if(${DUMMY_BUILD} STREQUAL 0)
         ${base_libs}
         ${platform_libs}
         ${LIB_PTHREAD_NAME}
+        m
     )
 
     link_directories(
