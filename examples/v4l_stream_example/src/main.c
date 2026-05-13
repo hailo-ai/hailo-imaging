@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <linux/v4l2-subdev.h>
 #include "../../../common/ioctl_cmds.h"
 
@@ -22,6 +23,7 @@
 #define NAME_FILE_LEN (39)
 #define FRAME_HEIGHT (2160)
 #define FRAME_WIDTH (3840)
+#define MAX_SET_CTRLS (16)
 
 #define VIDEO_DEVICE_NAME "/dev/video0"
 #define SUBDEV_PATH "/sys/class/video4linux"
@@ -214,6 +216,15 @@ struct __args {
 		.data.i = 30,
 		.help = "requested fps",
 	},
+	{
+		.name = "set-ctrl",
+		.type = STR,
+		.data.s = "",
+		.help = "set V4L2 controls before capture: name=val[,name=val,...]. "
+			"Validates range and verifies readback. "
+			"Only effective for raw capture or when AE is disabled. "
+			"Example: --set-ctrl=exposure=5000,hcg=1,analogue_gain=50",
+	},
 };
 
 static void print_help()
@@ -249,17 +260,18 @@ static int get_arg(char *name, struct __args *arg)
 
 static int split_arg(char *arg, struct arg *argument)
 {
-	char *token;
-	token = strtok(arg, "=");
-	if (!token)
+	char *eq;
+	/* Find FIRST '=' only — value may contain '=' (e.g. --set-ctrl=exposure=5000) */
+	eq = strchr(arg, '=');
+	if (!eq)
 		return -EINVAL;
 
-	/*remove -- at start of arguemnt*/
-	argument->key = token + 2;
-	token = strtok(NULL, "=");
-	if (!token)
+	*eq = '\0';
+	/*remove -- at start of argument*/
+	argument->key = arg + 2;
+	argument->val = eq + 1;
+	if (!argument->val[0])
 		return -EINVAL;
-	argument->val = token;
 	return 0;
 }
 
@@ -571,7 +583,7 @@ static int write_frame(int index, const char *output_path)
 	struct hailo15_get_vsm_params params;
 	int ret;
 	int dump_file = 0;
-	dump_file = open(output_path, O_RDWR | O_SYNC | O_CREAT, S_IRWXU);
+	dump_file = open(output_path, O_RDWR | O_CREAT, S_IRWXU);
 
 	memset(&params, 0, sizeof(params));
 	if (dump_file >= 0) {
@@ -622,6 +634,12 @@ static char* capture_file_name(int frame, int index_padding)
     return file_name;
 }
 
+static double timespec_diff_sec(struct timespec *start, struct timespec *end)
+{
+	return (end->tv_sec - start->tv_sec) +
+	       (end->tv_nsec - start->tv_nsec) / 1e9;
+}
+
 static int capture_frames_test_loop(int fd, int out_fd)
 {
 	unsigned int frame = 0;
@@ -632,6 +650,7 @@ static int capture_frames_test_loop(int fd, int out_fd)
 	int is_raw = 0;
 	int save_raw = 0;
 	int index_padding = 0;
+	struct timespec t_start, t_end;
 
 	ret = get_arg("num-frames", &arg);
 	if (ret)
@@ -643,7 +662,7 @@ static int capture_frames_test_loop(int fd, int out_fd)
 	ret = get_arg("format", &arg);
 	if (ret)
 		return ret;
-	
+
 	if (!strncmp(arg.data.s, "raw", 3)) {
 		is_raw = 1;
 		ret = get_arg("save", &arg);
@@ -654,6 +673,8 @@ static int capture_frames_test_loop(int fd, int out_fd)
 
 	index_padding = index_padding_length(num_frames);
 
+	clock_gettime(CLOCK_MONOTONIC, &t_start);
+
 	for (frame = 0; frame < num_frames; ++frame) {
 		ret = read_frame(fd);
 		if (ret < 0 || ret > n_buffers) {
@@ -663,7 +684,6 @@ static int capture_frames_test_loop(int fd, int out_fd)
 		if (is_raw) {
 			if (save_raw) {
 				char* raw_output_path = capture_file_name(frame, index_padding);
-				printf("Writing frame %d to %s\n", frame, raw_output_path);
 				write_frame(current_frame, raw_output_path);
 			}
 		} else {
@@ -673,6 +693,12 @@ static int capture_frames_test_loop(int fd, int out_fd)
 		}
 		queue_buffer(fd, current_frame);
 	}
+
+	clock_gettime(CLOCK_MONOTONIC, &t_end);
+	double elapsed = timespec_diff_sec(&t_start, &t_end);
+	printf("Captured %d frames in %.2f s (%.1f fps)\n",
+	       num_frames, elapsed,
+	       elapsed > 0 ? num_frames / elapsed : 0);
 
 	return 0;
 }
@@ -791,6 +817,120 @@ int is_hdr_enabled(int fd) {
 	return ctrl.value;
 }
 
+/**
+ * Find a V4L2 control ID by name on the given file descriptor.
+ * Enumerates all controls (including custom/private ones) and matches by name.
+ * Returns the control ID on success, or -1 if not found.
+ */
+static int find_ctrl_by_name(int fd, const char *name, struct v4l2_queryctrl *out_qctrl)
+{
+	struct v4l2_queryctrl qctrl;
+	memset(&qctrl, 0, sizeof(qctrl));
+	qctrl.id = V4L2_CTRL_FLAG_NEXT_CTRL;
+
+	while (xioctl(fd, VIDIOC_QUERYCTRL, &qctrl) == 0) {
+		if (!strcasecmp((char *)qctrl.name, name)) {
+			if (out_qctrl)
+				memcpy(out_qctrl, &qctrl, sizeof(qctrl));
+			return qctrl.id;
+		}
+		qctrl.id |= V4L2_CTRL_FLAG_NEXT_CTRL;
+	}
+	return -1;
+}
+
+/**
+ * Set a V4L2 control with range validation and readback verification.
+ * Returns 0 on success, negative on error.
+ */
+static int set_ctrl_validated(int fd, const char *name, int value)
+{
+	struct v4l2_queryctrl qctrl;
+	struct v4l2_control ctrl;
+	int ctrl_id;
+
+	ctrl_id = find_ctrl_by_name(fd, name, &qctrl);
+	if (ctrl_id < 0) {
+		fprintf(stderr, "ERROR: control '%s' not found on device\n", name);
+		return -EINVAL;
+	}
+
+	/* VIDIOC_S_CTRL only works with integer-type controls */
+	if (qctrl.type != V4L2_CTRL_TYPE_INTEGER &&
+	    qctrl.type != V4L2_CTRL_TYPE_BOOLEAN &&
+	    qctrl.type != V4L2_CTRL_TYPE_MENU) {
+		fprintf(stderr, "ERROR: control '%s' has unsupported type %d (only integer/boolean/menu supported)\n",
+			name, qctrl.type);
+		return -EINVAL;
+	}
+
+	if (value < qctrl.minimum || value > qctrl.maximum) {
+		fprintf(stderr, "ERROR: control '%s' value %d out of range [%d, %d] (step %d)\n",
+			name, value, qctrl.minimum, qctrl.maximum, qctrl.step);
+		return -ERANGE;
+	}
+
+	ctrl.id = ctrl_id;
+	ctrl.value = value;
+	if (-1 == xioctl(fd, VIDIOC_S_CTRL, &ctrl)) {
+		fprintf(stderr, "ERROR: failed to set control '%s' to %d: %s\n",
+			name, value, strerror(errno));
+		return -errno;
+	}
+
+	/* Readback verification */
+	ctrl.value = -1;
+	if (-1 == xioctl(fd, VIDIOC_G_CTRL, &ctrl)) {
+		fprintf(stderr, "ERROR: failed to read back control '%s': %s\n",
+			name, strerror(errno));
+		return -errno;
+	}
+
+	if (ctrl.value != value) {
+		fprintf(stderr, "ERROR: control '%s' readback mismatch: set %d, got %d\n",
+			name, value, ctrl.value);
+		return -EIO;
+	}
+
+	printf("Set control '%s' = %d (range [%d, %d]) - verified\n",
+	       name, value, qctrl.minimum, qctrl.maximum);
+	return 0;
+}
+
+/**
+ * Parse and apply --set-ctrl argument.
+ * Format: "name1=val1,name2=val2,..."
+ * Returns 0 on success, negative on first error (fails fast).
+ */
+static int apply_set_ctrls(int fd, const char *ctrl_str)
+{
+	char buf[512];
+	char *token, *saveptr;
+	int ret;
+
+	strncpy(buf, ctrl_str, sizeof(buf) - 1);
+	buf[sizeof(buf) - 1] = '\0';
+
+	token = strtok_r(buf, ",", &saveptr);
+	while (token) {
+		char *eq = strchr(token, '=');
+		if (!eq) {
+			fprintf(stderr, "ERROR: invalid control format '%s', expected name=value\n", token);
+			return -EINVAL;
+		}
+		*eq = '\0';
+		char *name = token;
+		int value = atoi(eq + 1);
+
+		ret = set_ctrl_validated(fd, name, value);
+		if (ret)
+			return ret;
+
+		token = strtok_r(NULL, ",", &saveptr);
+	}
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	struct __args arg;
@@ -835,6 +975,16 @@ int main(int argc, char *argv[])
     snprintf(sd_sensor_dev_path, sizeof(sd_sensor_dev_path), "/dev/v4l-subdev%d", sensor_sd_index);
 
 	fd_sensor = open_device(sd_sensor_dev_path);
+
+	/* Apply user-requested sensor controls before streaming */
+	ret = get_arg("set-ctrl", &arg);
+	if (ret == 0 && arg.data.s[0] != '\0') {
+		ret = apply_set_ctrls(fd_sensor, arg.data.s);
+		if (ret) {
+			fprintf(stderr, "Failed to apply sensor controls - aborting\n");
+			goto err_set_fmt;
+		}
+	}
 
 	hdr_enabled = is_hdr_enabled(fd_sensor);
 
