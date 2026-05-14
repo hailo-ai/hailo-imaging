@@ -368,7 +368,8 @@ static RESULT IMX664_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     pIMX664Ctx->Streaming = BOOL_FALSE;
     pIMX664Ctx->TestPattern = BOOL_FALSE;
     pIMX664Ctx->isAfpsRun = BOOL_FALSE;
-    
+    pIMX664Ctx->hcg_factor = 5.8f; /* Rcg typical, IMX664 Datasheet, Image Sensor Characteristics table */
+
     result = IMX664_SetSensorModeData(pIMX664Ctx, pConfig->SensorModeIndex);
     if (result != RET_SUCCESS) {
         TRACE(IMX664_ERROR, "%s: Set sensor mode data failed (result=%d)\n", __func__, result);
@@ -2027,9 +2028,16 @@ RESULT IMX664_Calculate3DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
     }
 
     // assume gain is 1 and see if ratio can be achieved with integration time
-    long_it 		= NewIntegrationTime * hdr_ratio[0];
-    short_it 		= NewIntegrationTime;
-    very_short_it 	= NewIntegrationTime / hdr_ratio[1];
+    {
+        float lef_sens = pIMX664Ctx->hcg_lef ? pIMX664Ctx->hcg_factor : 1.0f;
+        float sef_sens = pIMX664Ctx->hcg_sef1 ? pIMX664Ctx->hcg_factor : 1.0f;
+        float vs_sens  = pIMX664Ctx->hcg_sef2 ? pIMX664Ctx->hcg_factor : 1.0f;
+        float ls_adjusted = hdr_ratio[0] * sef_sens / lef_sens;
+        float sv_adjusted = hdr_ratio[1] * vs_sens / sef_sens;
+        long_it 		= NewIntegrationTime * ls_adjusted;
+        short_it 		= NewIntegrationTime;
+        very_short_it 	= NewIntegrationTime / sv_adjusted;
+    }
     
     TRACE(IMX664_DEBUG, "%s: requested IT long: %f, short: %f, very_short: %f\n", 
     __func__, long_it, short_it, very_short_it);
@@ -2162,7 +2170,13 @@ RESULT IMX664_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 
     /* Quantize short gain to sensor dB steps and compute the total long EV target. */
     short_gain = _sensorGain2linear(_linear2sensorGain(NewGain));
-    required_long_ev = NewIntegrationTime * short_gain * hdr_ratio[0];
+
+    {
+        float lef_sens = pIMX664Ctx->hcg_lef ? pIMX664Ctx->hcg_factor : 1.0f;
+        float sef_sens = pIMX664Ctx->hcg_sef1 ? pIMX664Ctx->hcg_factor : 1.0f;
+        float adjusted_ratio = hdr_ratio[0] * sef_sens / lef_sens;
+        required_long_ev = NewIntegrationTime * short_gain * adjusted_ratio;
+    }
 
     /* Step 1: Try to cover the required long EV with integration time alone (gain = 1). */
     ideal_long_lines = (uint32_t)roundf(required_long_ev / one_line);
@@ -2329,9 +2343,14 @@ RESULT IMX664_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
         }
 
         // Recalculate `io_hdr_ratio` according to the set values
-        hdr_ratio[0] = (long_it * long_gain) / (short_it * short_gain);
-        if (pIMX664Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
-            hdr_ratio[1] = (short_it * short_gain) / (very_short_it * very_short_gain);
+        {
+            float lef_sens = pIMX664Ctx->hcg_lef ? pIMX664Ctx->hcg_factor : 1.0f;
+            float sef_sens = pIMX664Ctx->hcg_sef1 ? pIMX664Ctx->hcg_factor : 1.0f;
+            hdr_ratio[0] = (long_it * long_gain * lef_sens) / (short_it * short_gain * sef_sens);
+            if (pIMX664Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
+                float vs_sens = pIMX664Ctx->hcg_sef2 ? pIMX664Ctx->hcg_factor : 1.0f;
+                hdr_ratio[1] = (short_it * short_gain * sef_sens) / (very_short_it * very_short_gain * vs_sens);
+            }
         }
 
         // Set the output values to SEF1 values
@@ -2677,7 +2696,7 @@ RESULT IMX664_IsiSetIrisIss( IsiSensorHandle_t handle,
 }
 
 RESULT IMX664_IsiGetHCGIss( IsiSensorHandle_t handle,
-                                     bool *phcg ) {
+                                     bool *phcg_lef, bool *phcg_sef1, bool *phcg_sef2 ) {
     RESULT result = RET_SUCCESS;
 
     TRACE(IMX664_INFO, "%s: (enter)\n", __func__);
@@ -2689,14 +2708,16 @@ RESULT IMX664_IsiGetHCGIss( IsiSensorHandle_t handle,
         return (RET_WRONG_HANDLE);
     }
 
-    *phcg = pIMX664Ctx->hcg;
+    *phcg_lef = pIMX664Ctx->hcg_lef;
+    *phcg_sef1 = pIMX664Ctx->hcg_sef1;
+    *phcg_sef2 = pIMX664Ctx->hcg_sef2;
 
     TRACE(IMX664_INFO, "%s: (exit)\n", __func__);
     return (result);
 }
 
-static RESULT IMX664_IsiSetHCGIss(IsiSensorHandle_t handle, bool hcg) {
-    
+static RESULT IMX664_IsiSetHCGIss(IsiSensorHandle_t handle, bool hcg_lef, bool hcg_sef1, bool hcg_sef2) {
+
     RESULT result = RET_SUCCESS;
 
     TRACE(IMX664_INFO, "%s: (enter)\n", __func__);
@@ -2709,24 +2730,28 @@ static RESULT IMX664_IsiSetHCGIss(IsiSensorHandle_t handle, bool hcg) {
         return (RET_WRONG_HANDLE);
     }
 
-    result = IMX664_IsiWriteRegIss(handle, 0x3030 , hcg);
-    CHECK_RESULT_RET(result, "write HCG");
-    pIMX664Ctx->hcg = hcg;
+    result = IMX664_IsiWriteRegIss(handle, 0x3030 , hcg_lef);
+    CHECK_RESULT_RET(result, "write HCG LEF");
+    pIMX664Ctx->hcg_lef = hcg_lef;
 
     if (pIMX664Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S ||
         pIMX664Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
-        result = IMX664_IsiWriteRegIss(handle, 0x3031 , hcg);
+        result = IMX664_IsiWriteRegIss(handle, 0x3031 , hcg_sef1);
         CHECK_RESULT_RET(result, "write HCG SEF1");
+        pIMX664Ctx->hcg_sef1 = hcg_sef1;
     }
     if (pIMX664Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
-        result = IMX664_IsiWriteRegIss(handle, 0x3032 , hcg);
+        result = IMX664_IsiWriteRegIss(handle, 0x3032 , hcg_sef2);
         CHECK_RESULT_RET(result, "write HCG SEF2");
+        pIMX664Ctx->hcg_sef2 = hcg_sef2;
     }
 
     TRACE(IMX664_INFO, "%s: (exit)\n", __func__);
     return result;
-    
+
 }
+
+
 
 static RESULT IMX664_CalculateHdrBlankingLines(IsiSensorHandle_t handle,
         uint32_t *pBlankingLines, uint32_t rhs1, uint32_t rhs2) {

@@ -989,7 +989,9 @@ RESULT IsiSetFlickerFpsIss
 RESULT IsiSetHCGIss
 (
     IsiSensorHandle_t   handle,
-    bool            hcg
+    bool            hcg_lef,
+    bool            hcg_sef1,
+    bool            hcg_sef2
 );
 
 
@@ -1000,7 +1002,9 @@ RESULT IsiSetHCGIss
  * @brief   Get DCG (Dual Conversion Gain) to either LCG or HCG mode (Low/High Conversion Gain).
  *
  * @param   handle                  sensor instance handle
- * @param   phcg                    false if LCG, true if HCG to set
+ * @param   phcg_lef                per-exposure HCG: LEF
+ * @param   phcg_sef1               per-exposure HCG: SEF1
+ * @param   phcg_sef2               per-exposure HCG: SEF2
  *
  * @return  Return the result of the function call.
  * @retval  RET_SUCCESS
@@ -1012,7 +1016,9 @@ RESULT IsiSetHCGIss
 RESULT IsiGetHCGIss
 (
     IsiSensorHandle_t   handle,
-    bool                *phcg
+    bool                *phcg_lef,
+    bool                *phcg_sef1,
+    bool                *phcg_sef2
 );
 
 /*****************************************************************************/
