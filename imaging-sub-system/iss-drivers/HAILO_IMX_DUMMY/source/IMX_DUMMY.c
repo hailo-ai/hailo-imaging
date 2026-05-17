@@ -363,6 +363,7 @@ static RESULT IMX_Dummy_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     pIMXDummyCtx->Streaming = BOOL_FALSE;
     pIMXDummyCtx->TestPattern = BOOL_FALSE;
     pIMXDummyCtx->isAfpsRun = BOOL_FALSE;
+    pIMXDummyCtx->hcg_factor = 1.0f;
     pIMXDummyCtx->SensorMode.index = pConfig->SensorModeIndex;
     pConfig->SensorModeIndex =
 	    MAX(MIN((sizeof(pimx_dummy_mode_info) / sizeof(pimx_dummy_mode_info[0])),
@@ -2585,7 +2586,7 @@ RESULT IMX_Dummy_IsiSetIrisIss( IsiSensorHandle_t handle,
 }
 
 RESULT IMX_Dummy_IsiGetHCGIss( IsiSensorHandle_t handle,
-                                     bool *phcg ) {
+                                     bool *phcg_lef, bool *phcg_sef1, bool *phcg_sef2 ) {
     RESULT result = RET_SUCCESS;
 
     TRACE(IMX_DUMMY_INFO, "%s: (enter)\n", __func__);
@@ -2597,14 +2598,16 @@ RESULT IMX_Dummy_IsiGetHCGIss( IsiSensorHandle_t handle,
         return (RET_WRONG_HANDLE);
     }
 
-    *phcg = pIMXDummyCtx->hcg;
+    *phcg_lef = pIMXDummyCtx->hcg_lef;
+    *phcg_sef1 = pIMXDummyCtx->hcg_sef1;
+    *phcg_sef2 = pIMXDummyCtx->hcg_sef2;
 
     TRACE(IMX_DUMMY_INFO, "%s: (exit)\n", __func__);
     return (result);
 }
 
-static RESULT IMX_Dummy_IsiSetHCGIss(IsiSensorHandle_t handle, bool hcg) {
-    
+static RESULT IMX_Dummy_IsiSetHCGIss(IsiSensorHandle_t handle, bool hcg_lef, bool hcg_sef1, bool hcg_sef2) {
+
     RESULT result = RET_SUCCESS;
 
     TRACE(IMX_DUMMY_INFO, "%s: (enter)\n", __func__);
@@ -2617,14 +2620,16 @@ static RESULT IMX_Dummy_IsiSetHCGIss(IsiSensorHandle_t handle, bool hcg) {
         return (RET_WRONG_HANDLE);
     }
 
-    result = IMX_Dummy_IsiWriteRegIss(handle, 0x3030 , hcg);
-    CHECK_RESULT_RET(result, "write HCG");
-    pIMXDummyCtx->hcg = hcg;
+    result = IMX_Dummy_IsiWriteRegIss(handle, 0x3030 , hcg_lef);
+    CHECK_RESULT_RET(result, "write HCG LEF");
+    pIMXDummyCtx->hcg_lef = hcg_lef;
 
     TRACE(IMX_DUMMY_INFO, "%s: (exit)\n", __func__);
     return result;
-    
+
 }
+
+
 
 RESULT IMX_Dummy_IsiGetSensorIss(IsiSensor_t* pIsiSensor) {
     RESULT result = RET_SUCCESS;

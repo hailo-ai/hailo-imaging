@@ -169,8 +169,8 @@ typedef RESULT (*IsiGetAutoFpsInfoIss_t)             ( IsiSensorHandle_t handle,
 typedef RESULT (*IsiGetStartEvIss_t)                 ( IsiSensorHandle_t handle, uint64_t *pStartEv );
 typedef RESULT (*IsiGetAgainDgainIss_t)              ( IsiSensorHandle_t handle, IsiUserGain_t *pGain );
 typedef RESULT (*IsiSetAgainDgainIss_t)              ( IsiSensorHandle_t handle, IsiUserGain_t Gain );
-typedef RESULT (*IsiSetHCGIss_t)                     ( IsiSensorHandle_t handle, bool hcg );
-typedef RESULT (*IsiGetHCGIss_t)                     ( IsiSensorHandle_t handle, bool *phcg );
+typedef RESULT (*IsiSetHCGIss_t)                     ( IsiSensorHandle_t handle, bool hcg_lef, bool hcg_sef1, bool hcg_sef2 );
+typedef RESULT (*IsiGetHCGIss_t)                     ( IsiSensorHandle_t handle, bool *phcg_lef, bool *phcg_sef1, bool *phcg_sef2 );
 
 
 /* SENSOR ISP */
