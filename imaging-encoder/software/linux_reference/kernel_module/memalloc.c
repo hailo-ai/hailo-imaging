@@ -90,7 +90,7 @@ static DEFINE_MUTEX(mem_mutex);
 static struct device *memalloc_dev = NULL;
 /* memory size in MBs for MEMALLOC_DYNAMIC */
 static unsigned int max_alloc_size = 0;
-static unsigned int allocated_size = 0;
+static int allocated_size = 0;
 
 static struct hlist_head hlina_chunks[1 << MEM_HASHTABLE_BITS];
 
@@ -134,7 +134,7 @@ static long memalloc_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
                 mutex_unlock(&mem_mutex);
                 break;
         case MEMALLOC_IOCXGETBUFFER:
-                ret = copy_from_user(&memparams, (MemallocParams*)arg,
+                ret = copy_from_user(&memparams, (void __user *)arg,
                                      sizeof(MemallocParams));
                 if(ret) {
                         printk(KERN_ERR "MEMALLOC_IOCXGETBUFFER: failed to copy params from user\n");
@@ -147,12 +147,12 @@ static long memalloc_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
                 ret = AllocMemory(&memparams.busAddress, memparams.size);
                 mutex_unlock(&mem_mutex);
                 memparams.translationOffset = 0;
-                ret |= copy_to_user((MemallocParams*)arg, &memparams,
+                ret |= copy_to_user((void __user *)arg, &memparams,
                                     sizeof(MemallocParams));
 
                 break;
         case MEMALLOC_IOCSFREEBUFFER:
-                if (get_user(busaddr, (unsigned long *) arg)) {
+                if (get_user(busaddr, (unsigned long __user *) arg)) {
                         printk(KERN_ERR "MEMALLOC_IOCSFREEBUFFER: failed to get busaddr from user\n");
                         return -EFAULT;
                 }
@@ -303,7 +303,7 @@ static int cmem_alloc(u32 size, hlina_chunk **chunk_out)
             return -ENOMEM;
     }
 
-    chunk = (hlina_chunk*)kzalloc(sizeof(*chunk), GFP_KERNEL);
+    chunk = kzalloc(sizeof(*chunk), GFP_KERNEL);
     if (!chunk) {
             printk(KERN_ERR "cmem_alloc: Allocation FAILED: could not allocate chunk structure\n");
             *chunk_out = NULL;
