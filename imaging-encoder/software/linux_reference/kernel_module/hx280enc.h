@@ -111,4 +111,9 @@ typedef struct {
         unsigned translationOffset;
 } MemallocParams;
 
+#ifdef __KERNEL__
+struct device;
+int memalloc_init(struct device *mem_dev, unsigned int max_alloc_sz);
+#endif
+
 #endif /* !_HX280ENC_H_ */
