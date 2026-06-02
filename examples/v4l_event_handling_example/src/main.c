@@ -139,7 +139,7 @@ int handle_statistic_events(int vid_fd) {
     memset(&ctrls, 0, sizeof(ctrls));
     memset(&ctrl, 0, sizeof(ctrl));
     poll_fds.fd = vid_fd;
-    poll_fds.events = POLLIN | POLLPRI;
+    poll_fds.events = POLLPRI;
 
     while (1) {
         ret = poll(&poll_fds, 1, time_out_ms);

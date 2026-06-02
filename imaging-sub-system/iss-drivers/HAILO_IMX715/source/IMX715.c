@@ -32,9 +32,11 @@
 #include <isi/isi.h>
 #include <isi/isi_iss.h>
 #include <isi/isi_priv.h>
+#include <errno.h>
 #include <linux/i2c-dev.h>
 #include <math.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
 
 #include "IMX715_priv.h"
 #include "vvsensor.h"
@@ -77,6 +79,10 @@ CREATE_TRACER(IMX715_REG_DEBUG, "IMX715: ", INFO, 1)
 #define IMX715_TRANSFER_BUFFER_LENGTH 3
 #define IMX715_TRANSFER_BUFFER_LENGTH 3
 #define IMX715_MAX_GAIN 3981
+/* Sensor returns EREMOTEIO while in runtime_suspend; retry briefly
+ * until power-on completes (~20ms). */
+#define IMX715_I2C_READ_MAX_ATTEMPTS 3
+#define IMX715_I2C_READ_RETRY_INTERVAL_US 10000
 
 #define IMX715_SHR0_RHS2_GAP 7
 #define IMX715_2DOL_SHR0_RHS1_GAP 9
@@ -478,10 +484,24 @@ static RESULT IMX715_IsiReadRegIss(IsiSensorHandle_t handle,
     ioctl_data.msgs = msgs;
     ioctl_data.nmsgs = 2;
 
-    if (ioctl(pIMX715Ctx->i2c_fd, I2C_RDWR, &ioctl_data) < 0) {
-        TRACE(IMX715_ERROR, "%s: ioctl I2C_RDWR failed, errno=%d (%s)\n",
-              __func__, errno, strerror(errno));
+    int ret = 0;
+    int attempt;
+    for (attempt = 0; attempt < IMX715_I2C_READ_MAX_ATTEMPTS; attempt++) {
+        ret = ioctl(pIMX715Ctx->i2c_fd, I2C_RDWR, &ioctl_data);
+        if (ret >= 0)
+            break;
+        if (errno != EREMOTEIO)
+            break;
+        usleep(IMX715_I2C_READ_RETRY_INTERVAL_US);
+    }
+    if (ret < 0) {
+        TRACE(IMX715_ERROR, "%s: ioctl I2C_RDWR failed, errno=%d (%s) after %d attempt(s)\n",
+              __func__, errno, strerror(errno), attempt + 1);
         return RET_FAILURE;
+    }
+    if (attempt > 0) {
+        TRACE(IMX715_INFO, "%s: I2C_RDWR ioctl recovered after %d EREMOTEIO retries (addr 0x%04x)\n",
+              __func__, attempt, Addr);
     }
 
     *pValue = out[0];
@@ -2049,11 +2069,6 @@ RESULT IMX715_Calculate3DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
         o_very_short_gain == NULL || hdr_ratio == NULL) {
         TRACE(IMX715_ERROR, "%s: Invalid parameter (NULL pointer detected)\n", __func__);
         return (RET_NULL_POINTER);
-    }
-
-    if (NewIntegrationTime == 0 || NewGain == 0) {
-        TRACE(IMX715_ERROR, "%s: Invalid parameter (NewIntegrationTime or NewGain is 0)\n", __func__);
-        return (RET_WRONG_CONFIG);
     }
 
 	if (pIMX715Ctx->cur_rhs1 == 0 || pIMX715Ctx->cur_rhs2 == 0) {
