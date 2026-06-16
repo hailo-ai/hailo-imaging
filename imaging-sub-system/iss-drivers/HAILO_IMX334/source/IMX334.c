@@ -1249,6 +1249,11 @@ RESULT IMX334_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
         return (RET_NULL_POINTER);
     }
 
+    /* Skip silently when PRE_STREAMOFF has paused 3A; trailing calls are expected. */
+    if (!pIMX334Ctx->Streaming) {
+        return RET_SUCCESS;
+    }
+
     if (pIMX334Ctx->enableHdr) {
         result = IMX334_IsiSetSEF1IntegrationTimeIss(
             handle, NewIntegrationTime, pSetIntegrationTime,
