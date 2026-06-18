@@ -32,9 +32,11 @@
 #include <isi/isi.h>
 #include <isi/isi_iss.h>
 #include <isi/isi_priv.h>
+#include <errno.h>
 #include <linux/i2c-dev.h>
 #include <math.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
 
 #include "IMX675_priv.h"
 #include "vvsensor.h"
@@ -59,6 +61,10 @@ CREATE_TRACER(IMX675_REG_DEBUG, "IMX675: ", INFO, 1)
 /* I2C */
 #define IMX675_I2C_ADDR 0x1a
 #define IMX675_TRANSFER_BUFFER_LENGTH 3
+/* Sensor returns EREMOTEIO while in runtime_suspend; retry briefly
+ * until power-on completes (~20ms). */
+#define IMX675_I2C_READ_MAX_ATTEMPTS 3
+#define IMX675_I2C_READ_RETRY_INTERVAL_US 10000
 
 /* AE */
 #define IMX675_MIN_SHR 4 // Min value of SHR0 in the software reference manual
@@ -387,6 +393,7 @@ static RESULT IMX675_IsiCreateIss(IsiSensorInstanceConfig_t* pConfig) {
     // By default, until specified otherwise, all ratios are 1 (SDR)
     pIMX675Ctx->hdr_ratio[0] = 1.0f;
     pIMX675Ctx->hdr_ratio[1] = 1.0f;
+    pIMX675Ctx->hcg_factor = 2.6f; /* Rcg typical, IMX675 Datasheet, Image Sensor Characteristics table */
 
     result = IMX675_SetSensorModeData(pIMX675Ctx, pConfig->SensorModeIndex);
     if (result != RET_SUCCESS) {
@@ -495,10 +502,24 @@ static RESULT IMX675_IsiReadRegIss(IsiSensorHandle_t handle,
     ioctl_data.msgs = msgs;
     ioctl_data.nmsgs = 2;
 
-    if (ioctl(pIMX675Ctx->i2c_fd, I2C_RDWR, &ioctl_data) < 0) {
-        TRACE(IMX675_ERROR, "%s: I2C_RDWR ioctl failed for addr 0x%04x, error %d (%s)\n",
-              __func__, Addr, errno, strerror(errno));
+    int ret = 0;
+    int attempt;
+    for (attempt = 0; attempt < IMX675_I2C_READ_MAX_ATTEMPTS; attempt++) {
+        ret = ioctl(pIMX675Ctx->i2c_fd, I2C_RDWR, &ioctl_data);
+        if (ret >= 0)
+            break;
+        if (errno != EREMOTEIO)
+            break;
+        usleep(IMX675_I2C_READ_RETRY_INTERVAL_US);
+    }
+    if (ret < 0) {
+        TRACE(IMX675_ERROR, "%s: I2C_RDWR ioctl failed for addr 0x%04x, error %d (%s) after %d attempt(s)\n",
+              __func__, Addr, errno, strerror(errno), attempt + 1);
         return RET_FAILURE;
+    }
+    if (attempt > 0) {
+        TRACE(IMX675_INFO, "%s: I2C_RDWR ioctl recovered after %d EREMOTEIO retries (addr 0x%04x)\n",
+              __func__, attempt, Addr);
     }
 
     *pValue = out[0];
@@ -2068,11 +2089,6 @@ RESULT IMX675_Calculate3DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
         return (RET_NULL_POINTER);
     }
 
-    if (NewIntegrationTime == 0 || NewGain == 0) {
-        TRACE(IMX675_ERROR, "%s: Invalid parameter (NewIntegrationTime or NewGain is 0)\n", __func__);
-        return (RET_WRONG_CONFIG);
-    }
-
 	if (pIMX675Ctx->cur_rhs1 == 0 || pIMX675Ctx->cur_rhs2 == 0) {
 		TRACE(IMX675_ERROR, "%s: Invalid parameter (RHS1 or RHS2 not set)\n", __func__);
 		return (RET_WRONG_CONFIG);
@@ -2086,7 +2102,14 @@ RESULT IMX675_Calculate3DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 		pIMX675Ctx->AecMinIntegrationTime = pIMX675Ctx->MinIntegrationLine * pIMX675Ctx->one_line_exp_time;
     }
 
-    very_short_it = NewIntegrationTime / hdr_ratio[1];
+    {
+        float lef_sens = pIMX675Ctx->hcg_lef ? pIMX675Ctx->hcg_factor : 1.0f;
+        float sef_sens = pIMX675Ctx->hcg_sef1 ? pIMX675Ctx->hcg_factor : 1.0f;
+        float vs_sens  = pIMX675Ctx->hcg_sef2 ? pIMX675Ctx->hcg_factor : 1.0f;
+        float ls_adjusted = hdr_ratio[0] * sef_sens / lef_sens;
+        float sv_adjusted = hdr_ratio[1] * vs_sens / sef_sens;
+
+    very_short_it = NewIntegrationTime / sv_adjusted;
     very_short_exp_val = very_short_it / pIMX675Ctx->one_line_exp_time;
     very_short_gain = _sensorGain2linear(_linear2sensorGain(NewGain));
 
@@ -2104,16 +2127,17 @@ RESULT IMX675_Calculate3DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
         __func__, rhs2 - IMX675_3DOL_SHR2_RHS2_GAP, very_short_it);
     }
 
-    *o_long_it = NewIntegrationTime * hdr_ratio[0];
+    *o_long_it = NewIntegrationTime * ls_adjusted;
     *o_long_gain = _sensorGain2linear(_linear2sensorGain(NewGain));
     *o_short_it = NewIntegrationTime;
     *o_short_gain = _sensorGain2linear(_linear2sensorGain(NewGain));
 
     if (recalc_vs_gain) {
-        very_short_gain = (NewIntegrationTime * (*o_short_gain)) / (very_short_it * hdr_ratio[1]);
+        very_short_gain = (NewIntegrationTime * (*o_short_gain)) / (very_short_it * sv_adjusted);
              very_short_gain = _sensorGain2linear(_linear2sensorGainCeil(very_short_gain));
-        very_short_it = (NewIntegrationTime * (*o_short_gain)) / (very_short_gain * hdr_ratio[1]);
+        very_short_it = (NewIntegrationTime * (*o_short_gain)) / (very_short_gain * sv_adjusted);
         }
+    }
 
     *o_very_short_it = very_short_it;
     *o_very_short_gain = very_short_gain;
@@ -2169,7 +2193,19 @@ RESULT IMX675_Calculate2DOLExposures(IsiSensorHandle_t handle, float NewIntegrat
 
     /* Quantize short gain to sensor dB steps and compute the total long EV target. */
     short_gain = _sensorGain2linear(_linear2sensorGain(NewGain));
-    required_long_ev = NewIntegrationTime * short_gain * hdr_ratio[0];
+
+    /*
+     * When HCG differs between LEF and SEF, adjust the IT*gain ratio to achieve
+     * the desired effective DR ratio. The effective ratio includes HCG sensitivity:
+     *   effective_ratio = (long_it * long_gain * lef_sensitivity) / (short_it * short_gain * sef_sensitivity)
+     * So the IT*gain ratio we need is: hdr_ratio[0] / (lef_sensitivity / sef_sensitivity)
+     */
+    {
+        float lef_sens = pIMX675Ctx->hcg_lef ? pIMX675Ctx->hcg_factor : 1.0f;
+        float sef_sens = pIMX675Ctx->hcg_sef1 ? pIMX675Ctx->hcg_factor : 1.0f;
+        float adjusted_ratio = hdr_ratio[0] * sef_sens / lef_sens;
+        required_long_ev = NewIntegrationTime * short_gain * adjusted_ratio;
+    }
 
     /* Step 1: Try to cover the required long EV with integration time alone (gain = 1). */
     ideal_long_lines = (uint32_t)roundf(required_long_ev / one_line);
@@ -2283,6 +2319,16 @@ RESULT IMX675_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
         return (RET_NULL_POINTER);
     }
 
+    /* Skip silently when PRE_STREAMOFF has paused 3A; trailing calls are expected. */
+    if (!pIMX675Ctx->Streaming) {
+        return RET_SUCCESS;
+    }
+
+    if (NewIntegrationTime == 0 || NewGain == 0) {
+        TRACE(IMX675_ERROR, "%s: Invalid parameter (NewIntegrationTime or NewGain is 0)\n", __func__);
+        return (RET_WRONG_CONFIG);
+    }
+
     // Regardless of 2dol/3dol (or SDR) - we should get the up-to-date hdr_ratio (if 2dol/sdr, hdr_ratio[1] = 1)
     pIMX675Ctx->hdr_ratio[0] = hdr_ratio[0];
     pIMX675Ctx->hdr_ratio[1] = hdr_ratio[1];
@@ -2339,10 +2385,15 @@ RESULT IMX675_IsiExposureControlIss(IsiSensorHandle_t handle, float NewGain,
 			CHECK_RESULT_RET(result, "SetSEF2Gain");
         }
 
-        // Recalculate `io_hdr_ratio` according to the set values
-        hdr_ratio[0] = (long_it * long_gain) / (short_it * short_gain);
-        if (pIMX675Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
-            hdr_ratio[1] = (short_it * short_gain) / (very_short_it * very_short_gain);
+        // Recalculate `io_hdr_ratio` according to the set values, including HCG sensitivity
+        {
+            float lef_sens = pIMX675Ctx->hcg_lef ? pIMX675Ctx->hcg_factor : 1.0f;
+            float sef_sens = pIMX675Ctx->hcg_sef1 ? pIMX675Ctx->hcg_factor : 1.0f;
+            hdr_ratio[0] = (long_it * long_gain * lef_sens) / (short_it * short_gain * sef_sens);
+            if (pIMX675Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
+                float vs_sens = pIMX675Ctx->hcg_sef2 ? pIMX675Ctx->hcg_factor : 1.0f;
+                hdr_ratio[1] = (short_it * short_gain * sef_sens) / (very_short_it * very_short_gain * vs_sens);
+            }
         }
 
         // Set the output values to SEF1 values
@@ -2687,7 +2738,7 @@ RESULT IMX675_IsiSetIrisIss( IsiSensorHandle_t handle,
 }
 
 RESULT IMX675_IsiGetHCGIss( IsiSensorHandle_t handle,
-                                     bool *phcg ) {
+                                     bool *phcg_lef, bool *phcg_sef1, bool *phcg_sef2 ) {
     RESULT result = RET_SUCCESS;
 
     TRACE(IMX675_INFO, "%s: (enter)\n", __func__);
@@ -2699,14 +2750,16 @@ RESULT IMX675_IsiGetHCGIss( IsiSensorHandle_t handle,
         return (RET_WRONG_HANDLE);
     }
 
-    *phcg = pIMX675Ctx->hcg;
+    *phcg_lef = pIMX675Ctx->hcg_lef;
+    *phcg_sef1 = pIMX675Ctx->hcg_sef1;
+    *phcg_sef2 = pIMX675Ctx->hcg_sef2;
 
     TRACE(IMX675_INFO, "%s: (exit)\n", __func__);
     return (result);
 }
 
-static RESULT IMX675_IsiSetHCGIss(IsiSensorHandle_t handle, bool hcg) {
-    
+static RESULT IMX675_IsiSetHCGIss(IsiSensorHandle_t handle, bool hcg_lef, bool hcg_sef1, bool hcg_sef2) {
+
     RESULT result = RET_SUCCESS;
 
     TRACE(IMX675_INFO, "%s: (enter)\n", __func__);
@@ -2719,23 +2772,27 @@ static RESULT IMX675_IsiSetHCGIss(IsiSensorHandle_t handle, bool hcg) {
         return (RET_WRONG_HANDLE);
     }
 
-    result = IMX675_IsiWriteRegIss(handle, 0x3030 , hcg);
-    CHECK_RESULT_RET(result, "write HCG");
-    pIMX675Ctx->hcg = hcg;
+    result = IMX675_IsiWriteRegIss(handle, 0x3030 , hcg_lef);
+    CHECK_RESULT_RET(result, "write HCG LEF");
+    pIMX675Ctx->hcg_lef = hcg_lef;
 
     if (pIMX675Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_L_AND_S ||
         pIMX675Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
-        result = IMX675_IsiWriteRegIss(handle, 0x3031 , hcg);
+        result = IMX675_IsiWriteRegIss(handle, 0x3031 , hcg_sef1);
         CHECK_RESULT_RET(result, "write HCG SEF1");
+        pIMX675Ctx->hcg_sef1 = hcg_sef1;
     }
     if (pIMX675Ctx->SensorMode.stitching_mode == SENSOR_STITCHING_3DOL) {
-        result = IMX675_IsiWriteRegIss(handle, 0x3032 , hcg);
+        result = IMX675_IsiWriteRegIss(handle, 0x3032 , hcg_sef2);
         CHECK_RESULT_RET(result, "write HCG SEF2");
+        pIMX675Ctx->hcg_sef2 = hcg_sef2;
     }
 
     TRACE(IMX675_INFO, "%s: (exit)\n", __func__);
     return result;
 }
+
+
 
 static RESULT IMX675_CalculateHdrBlankingLines(IsiSensorHandle_t handle,
         uint32_t *pBlankingLines, uint32_t rhs1, uint32_t rhs2) {
