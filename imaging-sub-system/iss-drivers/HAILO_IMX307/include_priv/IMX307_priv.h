@@ -135,7 +135,10 @@ typedef struct IMX307_Context_s
     float               AecCurIntegrationTimeSEF1;
     float               AecCurGainSEF2;
     float               AecCurIntegrationTimeSEF2;
-    bool				hcg;
+    bool                hcg_lef;
+    bool                hcg_sef1;
+    bool                hcg_sef2;
+    float               hcg_factor;
 
     bool                GroupHold;
     uint32_t            OldGain;
@@ -272,10 +275,10 @@ static RESULT IMX307_IsiSetSEF2IntegrationTimeIss(IsiSensorHandle_t handle,
 								float *hdr_ratio);
 
 static RESULT IMX307_IsiSetHCGIss(IsiSensorHandle_t handle,
-								bool hcg);
+								bool hcg_lef, bool hcg_sef1, bool hcg_sef2);
 
 static RESULT IMX307_IsiGetHCGIss(IsiSensorHandle_t handle,
-								bool *phcg);
+								bool *phcg_lef, bool *phcg_sef1, bool *phcg_sef2);
 
 static RESULT IMX307_IsiGetHdrBlankingLinesIss(IsiSensorHandle_t handle,
                                 uint32_t *pBlankingLines, 
