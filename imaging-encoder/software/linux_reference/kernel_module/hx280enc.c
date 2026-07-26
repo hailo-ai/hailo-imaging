@@ -1099,6 +1099,38 @@ void dump_regs(unsigned long data)
 #endif
 
 
+static int __maybe_unused vc8000e_suspend(struct device *dev)
+{
+    clk_disable_unprepare(hx280enc_data.clk);
+    clk_disable_unprepare(hx280enc_data.hclk);
+
+    return 0;
+}
+
+static int __maybe_unused vc8000e_resume(struct device *dev)
+{
+    int ret;
+
+    ret = clk_prepare_enable(hx280enc_data.hclk);
+    if (ret) {
+        dev_err(dev, "failed to enable hclk on resume (error %d)\n", ret);
+        return ret;
+    }
+
+    ret = clk_prepare_enable(hx280enc_data.clk);
+    if (ret) {
+        dev_err(dev, "failed to enable clk on resume (error %d)\n", ret);
+        clk_disable_unprepare(hx280enc_data.hclk);
+        return ret;
+    }
+
+    return 0;
+}
+
+static const struct dev_pm_ops vc8000e_pm_ops = {
+    SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(vc8000e_suspend, vc8000e_resume)
+};
+
 static const struct of_device_id vc8000e_of_match[] = {
     { .compatible = "vivante,vc8000e" },
     { /* Sentinel */ }
@@ -1109,6 +1141,7 @@ static struct platform_driver vc8000e_platform_driver = {
     .driver = {
         .name		= "vc8000e",
         .of_match_table	= vc8000e_of_match,
+        .pm		= &vc8000e_pm_ops,
     },
     .probe			= vc8000e_probe,
     .remove			= vc8000e_remove,
