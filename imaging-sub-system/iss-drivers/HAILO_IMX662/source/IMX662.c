@@ -2668,6 +2668,15 @@ RESULT IMX662_IsiGetHCGIss( IsiSensorHandle_t handle,
     return (result);
 }
 
+RESULT IMX662_IsiGetHcgFactorIss( IsiSensorHandle_t handle, float *pHcgFactor ) {
+    IMX662_Context_t* pIMX662Ctx = (IMX662_Context_t*)handle;
+    if (pIMX662Ctx == NULL || pHcgFactor == NULL) {
+        return (RET_WRONG_HANDLE);
+    }
+    *pHcgFactor = pIMX662Ctx->hcg_factor;
+    return (RET_SUCCESS);
+}
+
 static RESULT IMX662_IsiSetHCGIss(IsiSensorHandle_t handle, bool hcg_lef, bool hcg_sef1, bool hcg_sef2) {
 
     RESULT result = RET_SUCCESS;
@@ -2807,6 +2816,7 @@ RESULT IMX662_IsiGetSensorIss(IsiSensor_t* pIsiSensor) {
         pIsiSensor->pIsiGetIrisIss =						IMX662_IsiGetIrisIss;
         pIsiSensor->pIsiSetIrisIss =						IMX662_IsiSetIrisIss;
         pIsiSensor->pIsiGetHCGIss =                         IMX662_IsiGetHCGIss;
+        pIsiSensor->pIsiGetHcgFactorIss =                   IMX662_IsiGetHcgFactorIss;
         pIsiSensor->pIsiSetHCGIss =                         IMX662_IsiSetHCGIss;
 
         /* SENSOR ISP */

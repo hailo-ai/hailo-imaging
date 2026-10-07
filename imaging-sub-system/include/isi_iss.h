@@ -171,6 +171,7 @@ typedef RESULT (*IsiGetAgainDgainIss_t)              ( IsiSensorHandle_t handle,
 typedef RESULT (*IsiSetAgainDgainIss_t)              ( IsiSensorHandle_t handle, IsiUserGain_t Gain );
 typedef RESULT (*IsiSetHCGIss_t)                     ( IsiSensorHandle_t handle, bool hcg_lef, bool hcg_sef1, bool hcg_sef2 );
 typedef RESULT (*IsiGetHCGIss_t)                     ( IsiSensorHandle_t handle, bool *phcg_lef, bool *phcg_sef1, bool *phcg_sef2 );
+typedef RESULT (*IsiGetHcgFactorIss_t)               ( IsiSensorHandle_t handle, float *pHcgFactor );
 
 
 /* SENSOR ISP */
@@ -259,6 +260,7 @@ struct IsiSensor_s
     IsiSetAgainDgainIss_t               pIsiSetAgainDgainIss;
     IsiSetHCGIss_t                      pIsiSetHCGIss;
     IsiGetHCGIss_t                      pIsiGetHCGIss;
+    IsiGetHcgFactorIss_t                pIsiGetHcgFactorIss;
 
     /* SENSOR ISP */
     IsiGetIspStatusIss_t                pIsiGetIspStatusIss;

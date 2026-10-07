@@ -1,0 +1,2 @@
+In order to compile this directory localy, run:
+cmake -DLOCAL=1 -DDUMMY_BUILD=0 .

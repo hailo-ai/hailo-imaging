@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "_doc": "Drop this at /etc/hailo/sv4e_modes.json (or set HAILO_SV4E_MODES_JSON) and restart isp_media_server to override the SV4E mode list. Validation is fail-closed: any invalid entry rejects the whole file. Bounds: width<=3840, height<=2160, bit_width==12. Bayer: RGGB|GBRG|GRBG|BGGR. hdr_mode: linear (HDR variants deferred). fps must be 30 (other values produce wrong AE timing — non-30 fps support pending). 'index' values MUST be dense from 0..N-1 (the higher-level Sensor::queryGet enumerator iterates from 0 and stops at the first miss; non-dense indices silently hide later modes). All ae_info fields are optional and default to the values shown below.",
+  "modes": [
+    {
+      "index": 0, "width": 3840, "height": 2160, "fps": 30,
+      "bayer": "RGGB", "bit_width": 12, "hdr_mode": "linear",
+      "ae_info": {
+        "one_line_exp_time_ns": 7407, "max_integration_time": 4497,
+        "min_integration_time": 1, "integration_accuracy": 1,
+        "max_gain": 3981, "min_gain": 1, "gain_accuracy": 1,
+        "cur_fps": 30
+      }
+    },
+    {
+      "index": 1, "width": 1920, "height": 1080, "fps": 30,
+      "bayer": "RGGB", "bit_width": 12, "hdr_mode": "linear",
+      "ae_info": {
+        "one_line_exp_time_ns": 7407, "max_integration_time": 4497,
+        "min_integration_time": 1, "integration_accuracy": 1,
+        "max_gain": 3981, "min_gain": 1, "gain_accuracy": 1,
+        "cur_fps": 30
+      }
+    },
+    {
+      "index": 2, "width": 3840, "height": 2160, "fps": 30,
+      "bayer": "GBRG", "bit_width": 12, "hdr_mode": "linear",
+      "ae_info": {
+        "one_line_exp_time_ns": 7407, "max_integration_time": 4497,
+        "min_integration_time": 1, "integration_accuracy": 1,
+        "max_gain": 3981, "min_gain": 1, "gain_accuracy": 1,
+        "cur_fps": 30
+      }
+    },
+    {
+      "index": 3, "width": 1920, "height": 1080, "fps": 30,
+      "bayer": "GBRG", "bit_width": 12, "hdr_mode": "linear",
+      "ae_info": {
+        "one_line_exp_time_ns": 7407, "max_integration_time": 4497,
+        "min_integration_time": 1, "integration_accuracy": 1,
+        "max_gain": 3981, "min_gain": 1, "gain_accuracy": 1,
+        "cur_fps": 30
+      }
+    }
+  ]
+}

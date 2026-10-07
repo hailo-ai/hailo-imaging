@@ -1023,6 +1023,30 @@ RESULT IsiGetHCGIss
 
 /*****************************************************************************/
 /**
+ *          IsiGetHcgFactorIss
+ *
+ * @brief   Get the sensor's HCG/LCG conversion-gain ratio (Rcg in datasheet). 
+ *          Used to seed the SDR<->HDR-short exposure ratio on a cold
+ *          NN-core-HDR mode entry.
+ *
+ * @param   handle                  sensor instance handle
+ * @param   pHcgFactor              out: conversion-gain ratio
+ *
+ * @return  Return the result of the function call.
+ * @retval  RET_SUCCESS
+ * @retval  RET_WRONG_HANDLE
+ * @retval  RET_NOTSUPP             sensor does not report a conversion gain
+ *
+ *****************************************************************************/
+
+RESULT IsiGetHcgFactorIss
+(
+    IsiSensorHandle_t   handle,
+    float               *pHcgFactor
+);
+
+/*****************************************************************************/
+/**
  *          IsiGetAutoFpsInfoIss
  *
  * @brief   Get sensor auto fps information.
